@@ -7,7 +7,7 @@
  * ----------------------------------------------------------------------
  *
  * Software by Whirl-i-Gig (http://www.whirl-i-gig.com)
- * Copyright 2014 Whirl-i-Gig
+ * Copyright 2014-2018 Whirl-i-Gig
  *
  * For more information visit http://www.CollectiveAccess.org
  *
@@ -67,19 +67,44 @@ abstract class AuthorityAttributeValue extends AttributeValue {
 	}
 	# ------------------------------------------------------------------
 	/**
+	 * Get string value of attribute for display.
 	 *
-	 *
-	 * @param array Optional array of options. Support options are:
-	 *			template =
-	 *			includeID =
-	 *			idsOnly =
-	 *			forDuplication =
+	 * @param array Optional array of options. Supported options include:
+	 * 			returnIdno = If true list item idno is returned rather than preferred label [Default is false]
+	 *			idsOnly = Return numeric item_id only [Default is false]
+	 *			alwaysReturnItemID = Synonym for idsOnly [Default is false]
+	 *			output = Authority value to return. Valid values are text [display text], idno [identifier; same as returnIdno option], value [numeric id; same as idsOnly option]. [Default is value]
+	 *			forDuplication = Forces value suitable duplication of the record. This is almost always the numeric primary key ID for the related authority record. [Default is false]
+	 *			includeID = Include numeric primary key ID at end of display text, surrounded by brackets (Eg. [353]) [Default is false]
+	 *			template =  Display template for format returned value with. Template is evaluated related to the related authority record. [Default is null]
+	 *          checkAccess = 
 	 * @return string The value
 	 */
 	public function getDisplayValue($pa_options=null) {
 		if (!is_array($pa_options)) { $pa_options = array(); }
 		if (caGetOption('forDuplication', $pa_options, false)) {
 			return $this->opn_id;
+		}
+		if (isset($pa_options['output'])) {
+			switch(strtolower($pa_options['output'])) {
+				case 'idno':
+					$pa_options['returnIdno'] = true;
+					break;
+				case 'text':
+					$pa_options['returnIdno'] = false;
+					$pa_options['idsOnly'] = false;
+					break;
+				default:
+					$pa_options['idsOnly'] = true;
+					break;
+			}
+		}
+		
+		$vs_idno = $this->elementTypeToInstance($this->getType())->getIdnoForID($this->opn_id, $pa_options);
+		if($vs_idno === false) { return null; } // failed checkAccess checks
+		
+		if (caGetOption('returnIdno', $pa_options, false)) {
+			return $vs_idno;
 		}
 
 		$o_config = Configuration::load();
@@ -94,7 +119,7 @@ abstract class AuthorityAttributeValue extends AttributeValue {
 		$vb_ids_only = (bool)caGetOption('idsOnly', $pa_options, false);
 
 		if ($vb_ids_only) { return $this->opn_id; }
-		return $this->opn_id ? caProcessTemplateForIDs($ps_template, $this->ops_table_name, array($this->opn_id), array_merge($pa_options, array('returnAsArray' => false, 'returnAllLocales' => false))).($vb_include_id ? " [".$this->opn_id."]" : '') : "";
+		return $this->opn_id ? caProcessTemplateForIDs($ps_template, $this->ops_table_name, array($this->opn_id), array('returnAsArray' => false, 'returnAllLocales' => false)).($vb_include_id ? " [".$this->opn_id."]" : '') : "";
 	}
 	# ------------------------------------------------------------------
 	/**
@@ -116,7 +141,7 @@ abstract class AuthorityAttributeValue extends AttributeValue {
 			);
 		}
 		$vb_require_value = (is_null($pa_element_info['settings']['requireValue'])) ? true : (bool)$pa_element_info['settings']['requireValue'];
-
+        $vb_treat_value_as_idno = caGetOption('alwaysTreatValueAsIdno', $pa_options, false);
 		$o_trans = caGetOption('transaction', $pa_options, null);
 
 		$va_match_on = caGetOption('matchOn', $pa_options, null);
@@ -153,6 +178,11 @@ abstract class AuthorityAttributeValue extends AttributeValue {
 					}
 					break;
 			}
+		}
+		
+		
+		if ((!$vn_id) && ($o_log = caGetOption('log', $pa_options, null))) {
+			$o_log->logError(_t('Value %1 was not set for %2 because it does not refer to an existing %3', $ps_value, caGetOption('logIdno', $pa_options, '???'), $t_item->getProperty('name_singular')));
 		}
 
 		if (!$vb_require_value && !$vn_id) {
@@ -301,6 +331,9 @@ abstract class AuthorityAttributeValue extends AttributeValue {
 				break;
 			case __CA_ATTRIBUTE_VALUE_OBJECTLOTS__:
 				return $o_dm->getInstanceByTableName('ca_object_lots', true);
+				break;
+			case __CA_ATTRIBUTE_VALUE_OBJECTREPRESENTATIONS__:
+				return $o_dm->getInstanceByTableName('ca_object_representations', true);
 				break;
 		}
 		return null;

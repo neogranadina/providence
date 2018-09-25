@@ -7,7 +7,7 @@
  * ----------------------------------------------------------------------
  *
  * Software by Whirl-i-Gig (http://www.whirl-i-gig.com)
- * Copyright 2009-2015 Whirl-i-Gig
+ * Copyright 2009-2018 Whirl-i-Gig
  *
  * For more information visit http://www.CollectiveAccess.org
  *
@@ -37,6 +37,7 @@
 require_once(__CA_LIB_DIR__."/ca/IBundleProvider.php");
 require_once(__CA_LIB_DIR__."/ca/BundlableLabelableBaseModelWithAttributes.php");
 require_once(__CA_APP_DIR__.'/models/ca_set_items.php');
+require_once(__CA_APP_DIR__.'/models/ca_set_item_labels.php');
 require_once(__CA_APP_DIR__.'/models/ca_users.php');
 require_once(__CA_APP_DIR__.'/helpers/htmlFormHelpers.php');
 
@@ -378,7 +379,7 @@ class ca_sets extends BundlableLabelableBaseModelWithAttributes implements IBund
 		
 		$vs_set_code = trim($this->get('set_code'));
 		
-		if ((($vs_set_code_proc = preg_replace("![ ]+!", "_", $vs_set_code)) !== $vs_set_code) || !strlen($vs_set_code)) {
+		if ((($vs_set_code_proc = preg_replace("![^A-Za-z0-9]+!", "_", $vs_set_code)) !== $vs_set_code) || !strlen($vs_set_code)) {
 			$this->setMode(ACCESS_WRITE);
 			
 			if (!strlen($vs_set_code)) {
@@ -560,6 +561,8 @@ class ca_sets extends BundlableLabelableBaseModelWithAttributes implements IBund
 	 *			allUsers =
 	 *			publicUsers =
 	 *			name = 
+	 *          byUser = return sets grouped by user with access. The array will be key'ed by sortable user name. Each entry includes a 'user' array with information about the user and a 'sets' array with the list of sets that user has access to. [Default is false]
+	 *
 	 * @return array A list of sets keyed by set_id and then locale_id. Keys for the per-locale value array include: set_id, set_code, status, public access, owner user_id, content table_num, set type_id, set name, number of items in the set (item_count), set type name for display and set content type name for display. If setIDsOnly option is set then a simple array of set_id values is returned instead.
 	 */
 	public function getSets($pa_options=null) {
@@ -571,6 +574,8 @@ class ca_sets extends BundlableLabelableBaseModelWithAttributes implements IBund
 		$pb_set_ids_only = isset($pa_options['setIDsOnly']) ? (bool)$pa_options['setIDsOnly'] : false;
 		$pb_omit_counts = isset($pa_options['omitCounts']) ? (bool)$pa_options['omitCounts'] : false;
 		$ps_set_name = isset($pa_options['name']) ? $pa_options['name'] : null;
+		
+		$pb_by_user = caGetOption('byUser', $pa_options, null);
 		
 		$pn_row_id = (isset($pa_options['row_id']) && ((int)$pa_options['row_id'])) ? (int)$pa_options['row_id'] : null;
 
@@ -784,49 +789,73 @@ class ca_sets extends BundlableLabelableBaseModelWithAttributes implements IBund
 				
 				$va_sets[$qr_res->get('set_id')][$qr_res->get('locale_id')] = array_merge($qr_res->getRow(), array('item_count' => intval($va_item_counts[$qr_res->get('set_id')]), 'set_content_type' => $vs_set_type, 'set_type' => $vs_type));
 			}
-			return $va_sets;
-		} else {
-			if ($pb_set_ids_only) {
-				// get sets
-				$qr_res = $o_db->query("
-					SELECT ".join(', ', $va_sql_selects)."
-					FROM ca_sets cs
-					INNER JOIN ca_users AS u ON cs.user_id = u.user_id
-					LEFT JOIN ca_set_labels AS csl ON cs.set_id = csl.set_id
-					".join("\n", $va_extra_joins)."
-					".(sizeof($va_sql_wheres) ? 'WHERE ' : '')."
-					".join(' AND ', $va_sql_wheres)."
-					ORDER BY csl.name
-				", $va_sql_params);
-				return $qr_res->getAllFieldValues("set_id");
-			} else {
-				$qr_res = $o_db->query("
-					SELECT ".join(', ', $va_sql_selects)."
-					FROM ca_sets cs
-					INNER JOIN ca_users AS u ON cs.user_id = u.user_id
-					LEFT JOIN ca_set_labels AS csl ON cs.set_id = csl.set_id
-					LEFT JOIN ca_locales AS l ON csl.locale_id = l.locale_id
-					".join("\n", $va_extra_joins)."
-					".(sizeof($va_sql_wheres) ? 'WHERE ' : '')."
-					".join(' AND ', $va_sql_wheres)."
-					ORDER BY csl.name
-				", $va_sql_params);
-				$t_list = new ca_lists();
-				$va_sets = array();
-				while($qr_res->nextRow()) {
-					$vn_table_num = $qr_res->get('table_num');
-					if (!isset($va_type_name_cache[$vn_table_num]) || !($vs_set_type = $va_type_name_cache[$vn_table_num])) {
-						$vs_set_type = $va_type_name_cache[$vn_table_num] = $this->getSetContentTypeName($vn_table_num, array('number' => 'plural'));
-					}
-					
-					$vs_type = $t_list->getItemFromListForDisplayByItemID('set_types', $qr_res->get('type_id'));
-					
-					$va_sets[$qr_res->get('set_id')][$qr_res->get('locale_id')] = array_merge($qr_res->getRow(), array('item_count' => intval($va_item_counts[$qr_res->get('set_id')]), 'set_content_type' => $vs_set_type, 'set_type' => $vs_type));
-				}
-
-				return $va_sets;
+			
+			if ($pb_by_user) {
+			    $va_sets_by_user = [];
+			    $va_sets = caExtractValuesByUserLocale($va_sets);
+			    foreach($va_sets as $va_set) {
+			        $va_users = $this->getUsers(['row_id' => $va_set['set_id']]);
+			        
+			        $vs_user_key = strtolower(str_pad(substr($va_set['lname'], 0, 20), 20, ' ', STR_PAD_RIGHT).str_pad(substr($va_set['fname'], 0, 20), 20, ' ', STR_PAD_RIGHT).str_pad($va_set['user_id'], 10, '0', STR_PAD_LEFT));
+			        if (!isset($va_sets_by_user[$vs_user_key]['user'])) {
+			            $va_sets_by_user[$vs_user_key]['user'] = [
+			                'user_id' => $va_set['user_id'], 'user_name' => $va_set['user_name'],
+			                'fname' => $va_set['fname'], 'lname' => $va_set['lname'],
+			                'email' => $va_set['email']
+			            ];
+			        }
+			        $va_sets_by_user[$vs_user_key]['sets'][] = $va_set;
+			        
+			        foreach($va_users as $va_user) {
+			            $vs_user_key = strtolower(str_pad(substr($va_user['lname'], 0, 20), 20, ' ', STR_PAD_RIGHT).str_pad(substr($va_user['fname'], 0, 20), 20, ' ', STR_PAD_RIGHT).str_pad($va_user['user_id'], 10, '0', STR_PAD_LEFT));
+			            $va_sets_by_user[$vs_user_key]['user'] = $va_user;
+			            $va_sets_by_user[$vs_user_key]['sets'][] = $va_set;
+			        }
+			    }
+			    ksort($va_sets_by_user);
+			    return $va_sets_by_user;
 			}
 			
+			return $va_sets;
+		} elseif ($pb_set_ids_only) {
+			// get sets
+			$qr_res = $o_db->query("
+				SELECT ".join(', ', $va_sql_selects)."
+				FROM ca_sets cs
+				INNER JOIN ca_users AS u ON cs.user_id = u.user_id
+				LEFT JOIN ca_set_labels AS csl ON cs.set_id = csl.set_id
+				".join("\n", $va_extra_joins)."
+				".(sizeof($va_sql_wheres) ? 'WHERE ' : '')."
+				".join(' AND ', $va_sql_wheres)."
+				ORDER BY csl.name
+			", $va_sql_params);
+			return $qr_res->getAllFieldValues("set_id");
+		} else {
+			$qr_res = $o_db->query("
+				SELECT ".join(', ', $va_sql_selects)."
+				FROM ca_sets cs
+				INNER JOIN ca_users AS u ON cs.user_id = u.user_id
+				LEFT JOIN ca_set_labels AS csl ON cs.set_id = csl.set_id
+				LEFT JOIN ca_locales AS l ON csl.locale_id = l.locale_id
+				".join("\n", $va_extra_joins)."
+				".(sizeof($va_sql_wheres) ? 'WHERE ' : '')."
+				".join(' AND ', $va_sql_wheres)."
+				ORDER BY csl.name
+			", $va_sql_params);
+			$t_list = new ca_lists();
+			$va_sets = array();
+			while($qr_res->nextRow()) {
+				$vn_table_num = $qr_res->get('table_num');
+				if (!isset($va_type_name_cache[$vn_table_num]) || !($vs_set_type = $va_type_name_cache[$vn_table_num])) {
+					$vs_set_type = $va_type_name_cache[$vn_table_num] = $this->getSetContentTypeName($vn_table_num, array('number' => 'plural'));
+				}
+				
+				$vs_type = $t_list->getItemFromListForDisplayByItemID('set_types', $qr_res->get('type_id'));
+				
+				$va_sets[$qr_res->get('set_id')][$qr_res->get('locale_id')] = array_merge($qr_res->getRow(), array('item_count' => intval($va_item_counts[$qr_res->get('set_id')]), 'set_content_type' => $vs_set_type, 'set_type' => $vs_type));
+			}
+
+			return $va_sets;
 		}
 	}
 	# ------------------------------------------------------
@@ -1195,7 +1224,7 @@ class ca_sets extends BundlableLabelableBaseModelWithAttributes implements IBund
 			if(!$g_ui_locale_id) { $g_ui_locale_id = 1; }
 
 			$t_item->addLabel(array(
-				'caption' => _t('[BLANK]'),
+				'caption' => '['._t('BLANK').']',
 			), $g_ui_locale_id);
 			
 			if ($t_item->numErrors()) {
@@ -1217,7 +1246,8 @@ class ca_sets extends BundlableLabelableBaseModelWithAttributes implements IBund
 	 *
 	 * @param array $pa_row_ids
 	 * @param array $pa_options
-	 * 		queueIndexing -- defaults to true
+	 * 		queueIndexing = [Default is true]
+	 *		user_id = [Default is null]
 	 * @return int Returns item_id of newly created set item entry. The item_id is a unique identifier for the row_id in the city at the specified position (rank). It is *not* the same as the row_id.
 	 */
 	public function addItems($pa_row_ids, $pa_options = []) {
@@ -1227,6 +1257,8 @@ class ca_sets extends BundlableLabelableBaseModelWithAttributes implements IBund
 		if (!$vn_set_id) { return false; } 
 		if (!is_array($pa_row_ids)) { return false; } 
 		if (!sizeof($pa_row_ids)) { return false; } 
+		
+		$pn_user_id = caGetOption('user_id', $pa_options, null);
 		
 		$vn_table_num = $this->get('table_num');
 		$vn_type_id = $this->get('type_id');
@@ -1259,7 +1291,7 @@ class ca_sets extends BundlableLabelableBaseModelWithAttributes implements IBund
 
 			// Add empty labels to newly created items
 			foreach($va_item_ids as $vn_item_id) {
-				$va_label_values[] = "(".(int)$vn_item_id.",".(int)$g_ui_locale_id.",'"._t("[BLANK]")."')";
+				$va_label_values[] = "(".(int)$vn_item_id.",".(int)$g_ui_locale_id.",'["._t("BLANK")."]')";
 			}
 			$this->getDb()->query("INSERT INTO ca_set_item_labels (item_id, locale_id, caption) VALUES ".join(",", $va_label_values));
 			if ($this->getDb()->numErrors()) {
@@ -1269,6 +1301,36 @@ class ca_sets extends BundlableLabelableBaseModelWithAttributes implements IBund
 			
 			// Index the links
 			$this->getSearchIndexer()->reindexRows('ca_set_items', $va_item_ids, array('queueIndexing' => (bool) caGetOption('queueIndexing', $pa_options, true)));
+		
+			// Create change log entries
+			if(sizeof($va_item_ids)) {
+				$qr_res = $this->getDb()->query("SELECT * FROM ca_set_items WHERE item_id IN (?)", array($va_item_ids));
+			
+				$t_set_item = new ca_set_items();
+				
+				$va_set_ids = [];
+				while($qr_res->nextRow()) {
+					$va_snapshot = $qr_res->getRow();
+					$va_set_ids[$qr_res->get('ca_set_items.set_id')] = 1;
+					$t_set_item->logChange("I", $pn_user_id, ['row_id' => $qr_res->get('ca_set_items.item_id'), 'snapshot' => $va_snapshot]);
+				}
+			
+				$t_set_item_label = new ca_set_item_labels();
+				$qr_res = $this->getDb()->query("SELECT * FROM ca_set_item_labels WHERE item_id IN (?)", array($va_item_ids));
+				while($qr_res->nextRow()) {
+					$va_snapshot = $qr_res->getRow();
+					$t_set_item_label->logChange("I", $pn_user_id, ['row_id' => $qr_res->get('ca_set_item_labels.label_id'), 'snapshot' => $va_snapshot]);
+				}
+				
+				$qr_res = $this->getDb()->query("SELECT * FROM ca_sets WHERE set_id IN (?)", array(array_keys($va_set_ids)));
+			
+				$t_set = new ca_sets();
+				while($qr_res->nextRow()) {
+					$va_snapshot = $qr_res->getRow();
+					$t_set->logChange("U", $pn_user_id, ['row_id' => $qr_res->get('ca_sets.set_id'), 'snapshot' => $va_snapshot]);
+				}
+			}
+			
 		}
 		
 		return sizeof($va_item_values);
@@ -1393,6 +1455,31 @@ class ca_sets extends BundlableLabelableBaseModelWithAttributes implements IBund
 	}
 	# ------------------------------------------------------
 	/**
+	 * Returns a list of row_ids for a set with ranks for each, in rank order. This is a faster alternative to getRowIDRanks() that
+	 * queries the database directly and does no access checking. It is intended for use with lower level functions that need to sort
+	 * potentially large sets quickly.
+	 *
+	 * @param int $pn_set_id
+	 * @param array $pa_options An optional array of options. Supported options are:
+	 *			treatRowIDsAsRIDs = use combination row_id/item_id indices in returned array instead of solely row_ids. Since a set can potentially contain multiple instances of the same row_id, only "rIDs" – a combination of the row_id and the set item_id (row_id + "_" + item_id) – are guaranteed to be unique. [Default=false]
+	 * @return array ray keyed on row_id with values set to ranks for each item. If the set contains duplicate row_ids then the list will only have the largest rank.
+	 */
+	static public function getRowIDRanksForSet($pn_set_id, $pa_options=null) {
+		$vb_treat_row_ids_as_rids = caGetOption('treatRowIDsAsRIDs', $pa_options, false);
+		
+		$o_db = new Db();
+		$qr_res = $o_db->query("SELECT row_id, item_id, rank FROM ca_set_items WHERE set_id = ? AND deleted = 0 ORDER BY rank", [$pn_set_id]);
+	
+		$va_ranks = [];
+		
+		while($qr_res->nextRow()) {
+			$va_row = $qr_res->getRow();
+			$va_ranks[$vb_treat_row_ids_as_rids ? $va_row['row_id']."_".$va_row['item_id'] : $va_row['row_id']] = $va_row['rank'];
+		}
+		return $va_ranks;
+	}
+	# ------------------------------------------------------
+	/**
 	 * Sets order of items in the currently loaded set to the order of row_ids as set in $pa_row_ids
 	 *
 	 * @param array $pa_row_ids A list of row_ids in the set, in the order in which they should be displayed in the set
@@ -1407,12 +1494,12 @@ class ca_sets extends BundlableLabelableBaseModelWithAttributes implements IBund
 			return null;
 		}
 		
-		$vn_user_id = isset($pa_options['user_id']) ? (int)$pa_options['user_id'] : null; 
+		$pn_user_id = isset($pa_options['user_id']) ? (int)$pa_options['user_id'] : null; 
 		$vb_treat_row_ids_as_rids = caGetOption('treatRowIDsAsRIDs', $pa_options, false); 
 		$vb_delete_excluded_items = caGetOption('deleteExcludedItems', $pa_options, false);
 		
 		// does user have edit access to set?
-		if ($vn_user_id && !$this->haveAccessToSet($vn_user_id, __CA_SET_EDIT_ACCESS__)) {
+		if ($pn_user_id && !$this->haveAccessToSet($pn_user_id, __CA_SET_EDIT_ACCESS__)) {
 			return false;
 		}
 	
@@ -1487,17 +1574,41 @@ class ca_sets extends BundlableLabelableBaseModelWithAttributes implements IBund
 				}
 			} else {
 				// add item to set
-				$this->addItem($vb_treat_row_ids_as_rids ? $va_tmp[0] : $vn_row_id, null, $vn_user_id, $vn_rank_inc);
+				$this->addItem($vb_treat_row_ids_as_rids ? $va_tmp[0] : $vn_row_id, null, $pn_user_id, $vn_rank_inc);
 			}
 		}
 		
+		$va_updated_item_ids = [];
 		foreach($va_rank_updates as $vn_row_id => $vn_new_rank) {
 			if($vb_treat_row_ids_as_rids) {
 				$va_tmp = explode("_", $vn_row_id);
-				$this->getDb()->query("UPDATE ca_set_items SET rank = ? WHERE set_id = ? AND row_id = ? AND item_id = ?", $x=array($vn_new_rank, $vn_set_id, $va_tmp[0], $va_tmp[1]));
-
+				$this->getDb()->query("UPDATE ca_set_items SET rank = ? WHERE set_id = ? AND row_id = ? AND item_id = ?", array($vn_new_rank, $vn_set_id, $va_tmp[0], $va_tmp[1]));
+				$va_updated_item_ids[$va_tmp[1]] = 1;
 			} else {
 				$this->getDb()->query("UPDATE ca_set_items SET rank = ? WHERE set_id = ? AND row_id = ?", array($vn_set_id, $vn_new_rank));
+			}
+		}
+		
+		if(sizeof($va_updated_item_ids) > 0) {
+			$qr_res = $this->getDb()->query("SELECT * FROM ca_set_items WHERE item_id IN (?)", array(array_keys($va_updated_item_ids)));
+			
+			$t_set_item = new ca_set_items();
+			
+			$va_set_ids = [];
+			while($qr_res->nextRow()) {
+				$va_snapshot = $qr_res->getRow();
+				$va_set_ids[$qr_res->get('ca_set_items.set_id')] = 1;
+				$t_set_item->logChange("I", $pn_user_id, ['row_id' => $qr_res->get('ca_set_items.item_id'), 'snapshot' => $va_snapshot]);
+			}
+			
+			if (sizeof($va_set_ids)) {
+				$qr_res = $this->getDb()->query("SELECT * FROM ca_sets WHERE set_id IN (?)", array(array_keys($va_set_ids)));
+			
+				$t_set = new ca_sets();
+				while($qr_res->nextRow()) {
+					$va_snapshot = $qr_res->getRow();
+					$t_set->logChange("U", $pn_user_id, ['row_id' => $qr_res->get('ca_sets.set_id'), 'snapshot' => $va_snapshot]);
+				}
 			}
 		}
 		
@@ -1546,6 +1657,7 @@ class ca_sets extends BundlableLabelableBaseModelWithAttributes implements IBund
 	 *			returnItemAttributes = A list of attribute element codes for the ca_set_item record to return values for.
 	 *			idsOnly = Return a simple numerically indexed array of row_ids
 	 * 			template =
+	 *			item_ids = array of set item_ids to limit results to -> used by getPrimaryItemsFromSets so don't have to replicate all the functionality in this function
 	 *
 	 * @return array An array of items. The format varies depending upon the options set. If returnRowIdsOnly or returnItemIdsOnly are set then the returned array is a 
 	 *			simple list of ids. The full return array is key'ed on ca_set_items.item_id and then on locale_id. The values are arrays with keys set to a number of fields including:
@@ -1585,6 +1697,10 @@ class ca_sets extends BundlableLabelableBaseModelWithAttributes implements IBund
 		if (isset($pa_options['limit']) && ($pa_options['limit'] > 0)) {
 			$vs_limit_sql = "LIMIT ".$pa_options['limit'];
 		}
+		$vs_item_ids_sql = '';
+		if (isset($pa_options['item_ids']) && (is_array($pa_options['item_ids'])) && (sizeof($pa_options['item_ids']) > 0)) {
+			$vs_item_ids_sql = " AND casi.item_id IN (".join(", ", $pa_options['item_ids']).") ";
+		}
 		// get set items
 		$vs_access_sql = '';
 		if (isset($pa_options['checkAccess']) && is_array($pa_options['checkAccess']) && sizeof($pa_options['checkAccess']) && $t_rel_table->hasField('access')) {
@@ -1614,7 +1730,7 @@ LEFT JOIN ca_object_representations AS cor ON coxor.representation_id = cor.repr
 				INNER JOIN ca_objects AS rel ON rel.object_id = casi.row_id
 				INNER JOIN ca_objects_x_object_representations AS coxor ON coxor.object_id = rel.object_id
 				WHERE
-					casi.set_id = ? {$vs_access_sql} {$vs_deleted_sql}
+					casi.set_id = ? {$vs_access_sql} {$vs_deleted_sql} AND casi.deleted = 0
 				GROUP BY
 					rel.object_id
 			", (int)$vn_set_id);
@@ -1634,7 +1750,7 @@ LEFT JOIN ca_object_representations AS cor ON coxor.representation_id = cor.repr
 			INNER JOIN ".$t_rel_table->tableName()." AS rel ON rel.".$t_rel_table->primaryKey()." = casi.row_id
 			{$vs_label_join_sql}
 			WHERE
-				casi.set_id = ? {$vs_access_sql} {$vs_deleted_sql}
+				casi.set_id = ? {$vs_access_sql} {$vs_deleted_sql} {$vs_item_ids_sql} AND casi.deleted = 0
 			ORDER BY 
 				casi.rank ASC
 			{$vs_limit_sql}
@@ -1682,15 +1798,15 @@ LEFT JOIN ca_object_representations AS cor ON coxor.representation_id = cor.repr
 			{$vs_label_join_sql}
 			{$vs_rep_join_sql}
 			WHERE
-				casi.set_id = ? {$vs_rep_where_sql} {$vs_access_sql} {$vs_deleted_sql}
+				casi.set_id = ? {$vs_rep_where_sql} {$vs_access_sql} {$vs_deleted_sql} {$vs_item_ids_sql}  AND casi.deleted = 0
 			ORDER BY 
 				casi.rank ASC
 			{$vs_limit_sql}
 		", (int)$vn_set_id);
 
 		if($ps_template = caGetOption('template', $pa_options, null)) {
-			$qr_ids = $o_db->query("SELECT row_id FROM ca_set_items WHERE set_id = ? ORDER BY rank ASC", $this->getPrimaryKey());
-			$va_processed_templates = caProcessTemplateForIDs($ps_template, $t_rel_table->tableName(), $qr_ids->getAllFieldValues('row_id'), array('returnAsArray' => true));
+			$va_processed_templates = caProcessTemplateForIDs($ps_template, $t_rel_table->tableName(), $qr_res->getAllFieldValues('row_id'), array('returnAsArray' => true));
+			$qr_res->seek(0);
 		}
 		$va_items = array();
 
@@ -1814,15 +1930,15 @@ LEFT JOIN ca_object_representations AS cor ON coxor.representation_id = cor.repr
 		}	
 		$vs_deleted_sql = '';
 		if ($t_rel_table->hasField('deleted')) {
-			$vs_deleted_sql = ' AND deleted = 0';
+			$vs_deleted_sql = " AND {$vs_rel_table_name}.deleted = 0";
 		}
 		
 		$qr_res = $o_db->query("
-			SELECT count(distinct row_id) c
+			SELECT count(distinct ca_set_items.row_id) c
 			FROM ca_set_items
 			INNER JOIN {$vs_rel_table_name} ON {$vs_rel_table_name}.{$vs_rel_table_pk} = ca_set_items.row_id
 			WHERE
-				ca_set_items.set_id = ? {$vs_deleted_sql} {$vs_access_sql}
+				ca_set_items.set_id = ? {$vs_deleted_sql} {$vs_access_sql} AND (ca_set_items.deleted = 0)
 		", (int)$vn_set_id);
 		
 		if ($qr_res->nextRow()) {
@@ -1869,7 +1985,7 @@ LEFT JOIN ca_object_representations AS cor ON coxor.representation_id = cor.repr
 			FROM ca_set_items casi
 			INNER JOIN ".$t_rel_table->tableName()." AS rel ON rel.".$t_rel_table->primaryKey()." = casi.row_id
 			WHERE
-				casi.set_id = ? {$vs_access_sql} {$vs_deleted_sql}
+				casi.set_id = ? {$vs_access_sql} {$vs_deleted_sql} AND casi.deleted = 0
 		", array($vn_set_id));
 		
 		$va_type_ids = array();
@@ -1918,10 +2034,17 @@ LEFT JOIN ca_object_representations AS cor ON coxor.representation_id = cor.repr
 		$o_view->setVar('request', $po_request);
 		
 		if ($this->getPrimaryKey()) {
+			$vs_set_table_name = $this->getAppDatamodel()->getTableName($this->get('table_num'));
+			if (!($vs_template = caGetOption("{$vs_set_table_name}_display_template", $pa_bundle_settings, null))) {		// display template by table
+				if (!($vs_template = caGetOption('display_template', $pa_bundle_settings, null))) {						// try the old non-table-specific template?
+					$vs_template = $this->getAppConfig()->get("{$vs_set_table_name}_set_item_display_template");			// use default in app.conf
+				}
+			} 
+		
 			$va_items = caExtractValuesByUserLocale($this->getItems(array(
 				'thumbnailVersion' => $vs_thumbnail_version,
 				'user_id' => $po_request->getUserID(),
-				'template' => caGetOption('display_template', $pa_bundle_settings, null)
+				'template' => $vs_template
 			)), null, null, array());
 			$o_view->setVar('items', $va_items);
 		} else {
@@ -2006,6 +2129,18 @@ LEFT JOIN ca_object_representations AS cor ON coxor.representation_id = cor.repr
 	}
 	# ------------------------------------------------------
 	/**
+	 * Returns the name of the table that is the content type for the currently loaded set.
+	 *
+	 * @return string
+	 */
+	public function getItemType() {
+		if (!$this->getPrimaryKey()) { return null; }
+		$o_dm = $this->getAppDatamodel();
+		
+		return $o_dm->getTableName($this->get('table_num'));
+	}
+	# ------------------------------------------------------
+	/**
 	 * Returns the first item from each set listed in $pa_set_ids.
 	 *
 	 * @param array $pa_set_ids The set_ids (*not* set codes) for which the first item should be fetched
@@ -2033,6 +2168,80 @@ LEFT JOIN ca_object_representations AS cor ON coxor.representation_id = cor.repr
 		}
 		
 		return $va_items;
+	}
+	# ------------------------------------------------------
+	/**
+	 * Returns the primary items from each set listed in $pa_set_ids.  If no primary item is selected, default to first item in set
+	 *
+	 * @param array $pa_set_ids The set_ids (*not* set codes) for which the first item should be fetched
+	 * @param array $pa_options And optional array of options. Supported values include:
+	 *			version = the media version to include with returned set items, when media is available
+	 *			primary_attribute = md attribute used to indicate set item is primary; default = set_item_is_primary
+	 *			primary_list = list for primary attribute; default = set_item_is_primary
+	 *			primary_value = list item value for primary items; default = is_primary
+	 *
+	 * @return array A list of items; the keys of the array are set_ids while the values are associative arrays containing the latest information.
+	 */
+	public static function getPrimaryItemsFromSets($pa_set_ids, $pa_options=null) {
+		if (!is_array($pa_options)) { $pa_options = array(); }
+		$vs_version = (isset($pa_options['version']) && $pa_options['version']) ? $pa_options['version'] : 'thumbnail';
+		$pa_options["thumbnailVersion"] = $vs_version;
+		$vs_primary_attribute = (isset($pa_options['primary_attribute']) && $pa_options['primary_attribute']) ? $pa_options['primary_attribute'] : 'set_item_is_primary';
+		$vs_primary_list = (isset($pa_options['primary_list']) && $pa_options['primary_list']) ? $pa_options['primary_list'] : 'set_item_is_primary';
+		$vs_primary_value = (isset($pa_options['primary_value']) && $pa_options['primary_value']) ? $pa_options['primary_value'] : 'is_primary';
+		
+		
+		#$pa_options["limit"] = 1;
+		$t_set_item = new ca_set_items();
+		$va_items = array();
+		$o_db = new Db();
+		$qr_element = $o_db->query("
+			select element_id from ca_metadata_elements where element_code = ?
+		", array($vs_primary_attribute));
+		$va_primary_set_item_ids_for_set = array();
+		if($qr_element->numRows()){
+			$qr_element->nextRow();
+			$vn_element_id = $qr_element->get("element_id");
+			$t_lists = new ca_lists();
+			$vn_is_primary_item_id = $t_lists->getItemIDFromList($vs_primary_list, $vs_primary_value);
+			if($vn_is_primary_item_id){
+				foreach($pa_set_ids as $vn_set_id) {					
+					# --- query for set items based on attribute value of primary_attribute
+					$qr_primary_items = $o_db->query("
+						SELECT si.item_id, si.row_id
+						FROM ca_attribute_values av
+						INNER JOIN ca_attributes as a ON av.attribute_id = a.attribute_id
+						INNER JOIN ca_set_items as si ON si.item_id = a.row_id
+						WHERE a.table_num = ? AND av.item_id = ? AND si.set_id = ?					
+						", array($t_set_item->tableNum(), $vn_is_primary_item_id, $vn_set_id));
+					if($qr_primary_items->numRows()){
+						$va_tmp = array();
+						while($qr_primary_items->nextRow()){
+							$va_tmp[] = $qr_primary_items->get("item_id");
+						}
+						$va_primary_set_item_ids_for_set[$vn_set_id] = $va_tmp;
+					}					
+				}			
+			}
+		}
+		$t_set = new ca_sets();
+		foreach($pa_set_ids as $vn_set_id) {
+			if ($t_set->load($vn_set_id)) {
+				if(is_array($va_primary_set_item_ids_for_set[$vn_set_id])){
+					$pa_options["item_ids"] = $va_primary_set_item_ids_for_set[$vn_set_id];
+					$pa_options["limit"] = null;
+				}else{
+					$pa_options["limit"] = 1;
+				}
+				$va_item_list = caExtractValuesByUserLocale($t_set->getItems($pa_options));
+				$va_items[$vn_set_id] = $va_item_list;	
+			}
+		}
+		
+		return $va_items;		
+
+		
+		return true;
 	}
 	# ------------------------------------------------------
 	/**
@@ -2094,7 +2303,7 @@ LEFT JOIN ca_object_representations AS cor ON coxor.representation_id = cor.repr
 			INNER JOIN ca_object_representations AS caor ON caor.representation_id = caxor.representation_id
 			
 			WHERE
-				(casi.set_id = ?) AND (caxor.is_primary = 1) AND (o.deleted = 0)
+				(casi.set_id = ?) AND (caxor.is_primary = 1) AND (o.deleted = 0) AND (casi.deleted = 0)
 				{$vs_access_sql}
 			ORDER BY 
 				casi.rank ASC
@@ -2150,16 +2359,6 @@ LEFT JOIN ca_object_representations AS cor ON coxor.representation_id = cor.repr
 		}
 		return $vn_table_num;
 	}
-	# ------------------------------------------------------
-	
-	
-	
-	
-	
-	
-	
-	
-	
 	# ------------------------------------------------------
 	# new functions for pawtucket lightbox
 	# ------------------------------------------------------

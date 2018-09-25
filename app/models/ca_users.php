@@ -7,7 +7,7 @@
  * ----------------------------------------------------------------------
  *
  * Software by Whirl-i-Gig (http://www.whirl-i-gig.com)
- * Copyright 2008-2015 Whirl-i-Gig
+ * Copyright 2008-2018 Whirl-i-Gig
  *
  * For more information visit http://www.CollectiveAccess.org
  *
@@ -41,6 +41,7 @@ require_once(__CA_APP_DIR__.'/models/ca_user_groups.php');
 require_once(__CA_APP_DIR__.'/models/ca_locales.php');
 require_once(__CA_LIB_DIR__.'/core/Zend/Currency.php');
 require_once(__CA_LIB_DIR__ . '/core/Auth/AuthenticationManager.php');
+require_once(__CA_LIB_DIR__."/ca/SyncableBaseModel.php");
 
 
 BaseModel::$s_ca_models_definitions['ca_users'] = array(
@@ -144,7 +145,7 @@ BaseModel::$s_ca_models_definitions['ca_users'] = array(
 				'BOUNDS_VALUE' => array(0,1)
 		),
 		'registered_on' => array(
-				'FIELD_TYPE' => FT_TIMESTAMP, 'DISPLAY_TYPE' => DT_OMIT, 
+				'FIELD_TYPE' => FT_DATETIME, 'DISPLAY_TYPE' => DT_OMIT, 
 				'DISPLAY_WIDTH' => 10, 'DISPLAY_HEIGHT' => 1,
 				'IS_NULL' => true, 
 				'DEFAULT' => '',
@@ -169,6 +170,8 @@ BaseModel::$s_ca_models_definitions['ca_users'] = array(
 );
 
 class ca_users extends BaseModel {
+	use SyncableBaseModel;
+	
 	# ---------------------------------
 	# --- Object attribute properties
 	# ---------------------------------
@@ -239,7 +242,7 @@ class ca_users extends BaseModel {
 	# Change logging
 	# ------------------------------------------------------
 	protected $UNIT_ID_FIELD = null;
-	protected $LOG_CHANGES_TO_SELF = false;
+	protected $LOG_CHANGES_TO_SELF = true;
 	protected $LOG_CHANGES_USING_AS_SUBJECT = array(
 		"FOREIGN_KEYS" => array(
 		
@@ -404,7 +407,10 @@ class ca_users extends BaseModel {
 		$this->set("vars",$this->opa_user_vars);
 		$this->set("volatile_vars",$this->opa_volatile_user_vars);
 		
-		return parent::insert($pa_options);
+		if ($vn_rc = parent::insert($pa_options)) {
+			$this->setGUID($pa_options);
+		}
+		return $vn_rc;
 	}
 	# ----------------------------------------
 	/**
@@ -446,9 +452,17 @@ class ca_users extends BaseModel {
 			$this->set("volatile_vars",$this->opa_volatile_user_vars);
 		}
 		
+		$va_changed_fields = $this->getChangedFieldValuesArray();
+		unset($va_changed_fields['vars']);
+		unset($va_changed_fields['volatile_vars']);
+		
+		if (sizeof($va_changed_fields) == 0) {
+			$pa_options['dontLogChange'] = true;
+		}
+		
 		unset(ca_users::$s_user_role_cache[$this->getPrimaryKey()]);
 		unset(ca_users::$s_group_role_cache[$this->getPrimaryKey()]);
-		return parent::update();
+		return parent::update($pa_options);
 	}
 	# ----------------------------------------
 	/**
@@ -460,7 +474,8 @@ class ca_users extends BaseModel {
 	public function delete($pb_delete_related=false, $pa_options=null, $pa_fields=null, $pa_table_list=null) {
 		$this->clearErrors();
 		$this->set('userclass', 255);
-
+		$vn_primary_key = $this->getPrimaryKey();
+		
 		if($this->getPrimaryKey()>0) {
 			try {
 				AuthenticationManager::deleteUser($this->get('user_name'));
@@ -472,7 +487,11 @@ class ca_users extends BaseModel {
 			}
 		}
 
-		return $this->update();
+		$vn_rc = $this->update($pa_options);
+		
+		if($vn_primary_key && $vn_rc && caGetOption('hard', $pa_options, false)) {
+			$this->removeGUID($vn_primary_key);
+		}
 	}
 	# ----------------------------------------
 	public function set($pa_fields, $pm_value="", $pa_options=null) {
@@ -1342,7 +1361,7 @@ class ca_users extends BaseModel {
 		}
 		if (!$vb_got_group) {
 			if (!$t_group->load(array("name" => $ps_group))) {
-				if (!$t_group->load(array("name_short" => $ps_group))) {
+				if (!$t_group->load(array("code" => $ps_group))) {
 					return false;
 				}
 			}
@@ -1839,9 +1858,12 @@ class ca_users extends BaseModel {
 								}
 							}
 							
+							$va_restrict_to_ui_locales = $this->getAppConfig()->getList('restrict_to_ui_locales');
+							
 							$va_opts = array();
 							$t_locale = new ca_locales();
 							foreach($va_locales as $vs_code => $va_parts) {
+								if (is_array($va_restrict_to_ui_locales) && sizeof($va_restrict_to_ui_locales) && !in_array($vs_code, $va_restrict_to_ui_locales)) { continue; }
 								try {
 									$vs_lang_name = Zend_Locale::getTranslation(strtolower($va_parts[0]), 'language', strtolower($va_parts[0]));
 									$vs_country_name = Zend_Locale::getTranslation($va_parts[1], 'Country', $vs_code);
@@ -2054,6 +2076,10 @@ class ca_users extends BaseModel {
 					
 					$vs_output = "<input type='password' name='pref_$ps_pref' size='$vn_display_width' maxlength='$vn_max_input_length'".$vs_class." value='".htmlspecialchars($vs_current_value, ENT_QUOTES, 'UTF-8')."'/>\n";
 					
+					break;
+				# ---------------------------------
+				case 'DT_HIDDEN':
+					// noop
 					break;
 				# ---------------------------------
 				default:
@@ -2564,7 +2590,7 @@ class ca_users extends BaseModel {
 	public function close() {
 		if($this->getPrimaryKey()) {
 			$this->setMode(ACCESS_WRITE);
-			$this->update();
+			$this->update(['dontLogChange' => true]);
 		}
 	}
 	# ----------------------------------------
@@ -2848,12 +2874,18 @@ class ca_users extends BaseModel {
 	 * keys and values that can contain such information
 	 */
 	public function authenticate(&$ps_username, $ps_password="", $pa_options=null) {
+	
+		$vs_username = $ps_username;
+		if ($vs_rewrite_username_with_regex = $this->opo_auth_config->get('rewrite_username_with_regex')) {
+			$vs_rewrite_username_to_regex = $this->opo_auth_config->get('rewrite_username_to_regex');
+			$vs_username = preg_replace("!".preg_quote($vs_rewrite_username_with_regex, "!")."!", $vs_rewrite_username_to_regex, $vs_username);
+		}
 
 		// if user doesn't exist, try creating it through the authentication backend, if the backend supports it
-		if (strlen($ps_username) > 0 && !$this->load($ps_username)) {
+		if (strlen($vs_username) > 0 && !$this->load($vs_username)) {
 			if(AuthenticationManager::supports(__CA_AUTH_ADAPTER_FEATURE_AUTOCREATE_USERS__)) {
 				try{
-					$va_values = AuthenticationManager::getUserInfo($ps_username, $ps_password);
+					$va_values = AuthenticationManager::getUserInfo($vs_username, $ps_password);
 				} catch (Exception $e) {
 					$this->opo_log->log(array(
 						'CODE' => 'SYS', 'SOURCE' => 'ca_users/authenticate',
@@ -2905,8 +2937,8 @@ class ca_users extends BaseModel {
 		}
 
 		try {
-			if(AuthenticationManager::authenticate($ps_username, $ps_password, $pa_options)) {
-				$this->load($ps_username);
+			if(AuthenticationManager::authenticate($vs_username, $ps_password, $pa_options)) {
+				$this->load($vs_username);
 				return true;
 			}
 		}  catch (Exception $e) {
@@ -3183,8 +3215,6 @@ class ca_users extends BaseModel {
 		if (isset(ca_users::$s_user_type_access_cache[$vs_cache_key])) { return ca_users::$s_user_type_access_cache[$vs_cache_key]; }
 
 		if(in_array($ps_table_name, ca_users::$s_bundlable_tables)) { // type-level access control only applies to these tables
-			if(in_array($ps_table_name, ['ca_list_items', 'ca_set_items'])) { return __CA_BUNDLE_ACCESS_EDIT__; }
-
 			$va_roles = array_merge($this->getUserRoles(), $this->getGroupRoles());
 			
 			if (is_numeric($pm_type_code_or_id)) { 

@@ -32,8 +32,6 @@
 	if (!file_exists('./setup.php')) { print "No setup.php file found!"; exit; }
 	require('./setup.php');
 
-	caWriteServerConfigHints();
-
 	try {
 		// connect to database
 		$o_db = new Db(null, null, false);
@@ -80,7 +78,7 @@
 		//
 		// Don't try to authenticate when doing a login attempt or trying to access the 'forgot password' feature
 		//
-		if (!preg_match("/^\/system\/auth\/(dologin|login|forgot|requestpassword|initreset|doreset)/i", $req->getPathInfo())) {
+		if (!preg_match("/^[\/]{0,1}system\/auth\/(dologin|login|forgot|requestpassword|initreset|doreset)/", strtolower($req->getPathInfo()))) {
 			$vb_auth_success = $req->doAuthentication(array('noPublicUsers' => true));
 
 			if(!$vb_auth_success) {

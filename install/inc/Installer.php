@@ -7,7 +7,7 @@
  * ----------------------------------------------------------------------
  *
  * Software by Whirl-i-Gig (http://www.whirl-i-gig.com)
- * Copyright 2011-2012 Whirl-i-Gig
+ * Copyright 2011-2018 Whirl-i-Gig
  *
  * For more information visit http://www.CollectiveAccess.org
  *
@@ -49,6 +49,11 @@ class Installer {
 	protected $ops_admin_email;
 	protected $opb_overwrite;
 	# --------------------------------------------------
+	/** @var  bool */
+	protected $opb_logging_status = false;
+	/** @var KLogger */
+	protected $opo_log;
+	# --------------------------------------------------
 	/** @var  SimpleXMLElement */
 	protected $opo_profile;
 	/** @var  SimpleXMLElement */
@@ -65,6 +70,11 @@ class Installer {
 	protected $opo_db;
 	# --------------------------------------------------
 	/**
+	 * @var array
+	 */
+	protected $opa_metadata_element_deferred_settings_processing = [];
+	# --------------------------------------------------
+	/**
 	 * Constructor
 	 *
 	 * @param string $ps_profile_dir path to a directory containing profiles and XML schema
@@ -73,15 +83,16 @@ class Installer {
 	 * @param boolean $pb_overwrite overwrite existing install? optional, defaults to false
 	 * @param boolean $pb_debug enable or disable debugging mode
 	 * @param boolean $pb_skip_load dont actually load profile (useful if you want to fill in some gaps by hand)
+	 * @param boolean $pb_log_output log output using Klogger
 	 */
-	public function  __construct($ps_profile_dir,$ps_profile_name,$ps_admin_email=null,$pb_overwrite=false,$pb_debug=false,$pb_skip_load=false) {
+	public function  __construct($ps_profile_dir, $ps_profile_name, $ps_admin_email=null, $pb_overwrite=false, $pb_debug=false, $pb_skip_load=false, $pb_log_output=false) {
 		$this->ops_profile_dir = $ps_profile_dir;
 		$this->ops_profile_name = $ps_profile_name;
 		$this->ops_admin_email = $ps_admin_email;
 		$this->opb_overwrite = $pb_overwrite;
 		$this->opb_debug = $pb_debug;
 
-		$this->opa_locales = array();
+		$this->opa_locales = [];
 
 		$this->opo_db = new Db();
 
@@ -96,6 +107,13 @@ class Installer {
 				$this->addError("Could not read profile '{$ps_profile_name}'. Please check the file permissions.");
 			}
 		}
+
+		if($pb_log_output) {
+			require_once(__CA_LIB_DIR__.'/core/Logging/KLogger/KLogger.php');
+			// @todo make this configurable or get from app.conf?
+			$this->opo_log = new KLogger(__CA_BASE_DIR__ . '/app/log', KLogger::DEBUG);
+			$this->opb_logging_status = true;
+		}
 	}
 	# --------------------------------------------------
 	/**
@@ -105,10 +123,11 @@ class Installer {
 	 * @param string $ps_profile_xml
 	 * @param string $ps_admin_email
 	 * @param bool $pb_overwrite
+	 * @param bool $pb_log_output
 	 * @return Installer|false
 	 */
-	public static function getFromString($ps_profile_xml, $ps_admin_email='', $pb_overwrite=false) {
-		$o_installer = new Installer(__CA_BASE_DIR__.'/install/profiles/xml', 'export', $ps_admin_email, $pb_overwrite, false, true);
+	public static function getFromString($ps_profile_xml, $ps_admin_email='', $pb_overwrite=false, $pb_log_output=false) {
+		$o_installer = new Installer(__CA_BASE_DIR__.'/install/profiles/xml', 'export', $ps_admin_email, $pb_overwrite, false, true, $pb_log_output);
 		if($o_installer->loadProfileFromString($ps_profile_xml, true)) {
 			$o_installer->extractAndLoadBase();
 			return $o_installer;
@@ -160,6 +179,12 @@ class Installer {
 			}
 		}
 
+		if($vb_return) {
+			$this->logStatus(_t('Successfully validated profile %1', $this->ops_profile_name));
+		} else {
+			$this->logStatus(_t('Validation failed for profile %1', $this->ops_profile_name));
+		}
+
 		return $vb_return;
 	}
 	# --------------------------------------------------
@@ -187,6 +212,8 @@ class Installer {
 			throw new Exception('Something went wrong while initializing Installer. Did you send valid XML?');
 		}
 
+		$this->logStatus(_t('Successfully loaded profile from string'));
+
 		return (bool) $this->opo_profile;
 	}
 	# --------------------------------------------------
@@ -194,6 +221,7 @@ class Installer {
 		$this->ops_base_name = self::getAttribute($this->opo_profile, "base");
 		if($this->ops_base_name) {
 			$this->opo_base = simplexml_load_file($this->ops_profile_dir."/".$this->ops_base_name.".xml");
+			$this->logStatus(_t('Successfully loaded base profile %1', $this->ops_base_name));
 		} else {
 			$this->opo_base = null;
 		}
@@ -202,6 +230,7 @@ class Installer {
 	# ERROR HANDLING / DEBUGGING
 	# --------------------------------------------------
 	protected function addError($ps_error) {
+		$this->logStatus($ps_error);
 		$this->opa_errors[] = $ps_error;
 	}
 	# --------------------------------------------------
@@ -282,7 +311,7 @@ class Installer {
 		$va_old_label_ids = array_flip($t_instance->getLabelIDs());
 
 		foreach($po_labels->children() as $vo_label) {
-			$va_label_values = array();
+			$va_label_values = [];
 			$vs_locale = self::getAttribute($vo_label, "locale");
 			$vn_locale_id = $pa_locales[$vs_locale];
 
@@ -349,13 +378,43 @@ class Installer {
 
 		if ($o_config->get('search_engine_plugin') == 'ElasticSearch') {
 			$o_es = new WLPlugSearchEngineElasticSearch();
-			$o_es->truncateIndex();
+			try {
+				$o_es->truncateIndex();
+			} catch(DatabaseException $e) {
+				// noop. this can happen when we operate on an empty database where ca_application_vars doesn't exist yet
+			}
 		}
 
 		return true;
 	}
 	# --------------------------------------------------
 	public function performPostInstallTasks() {
+	    // process metadata element settings that couldn't be processed during install
+	    // (Eg. those for hideIfSelected_*)
+	    if (sizeof($this->opa_metadata_element_deferred_settings_processing)) {
+	        foreach($this->opa_metadata_element_deferred_settings_processing as $vs_element_code => $va_settings) {
+	            if (!($t_element = ca_metadata_elements::getInstance($vs_element_code))) { continue; }
+	            $t_element->setMode(ACCESS_WRITE);
+	            $va_available_settings = $t_element->getAvailableSettings();
+	            foreach($va_settings as $vs_setting_name => $va_setting_values) {
+	                if (!isset($va_available_settings[$vs_setting_name])) { continue; }
+	                
+	                if (isset($va_available_settings[$vs_setting_name]['multiple']) && $va_available_settings[$vs_setting_name]['multiple']) {
+	                    $t_element->setSetting($vs_setting_name, $va_setting_values);
+	                } else {
+	                    $t_element->setSetting($vs_setting_name, array_shift($va_setting_values));
+	                }
+	            }
+	        }
+	        $t_element->update();
+	    } 
+	    
+		// generate system GUID -- used to identify systems in data sync protocol
+		$o_vars = new ApplicationVars();
+		$o_vars->setVar('system_guid', caGenerateGUID());
+		$o_vars->save();
+
+		// refresh mapping if ElasticSearch is used
 		$o_config = Configuration::load();
 		if ($o_config->get('search_engine_plugin') == 'ElasticSearch') {
 			$o_si = new SearchIndexer();
@@ -443,13 +502,18 @@ class Installer {
 			$this->opa_locales[$vs_code] = $va_locale['locale_id'];
 		}
 		if($this->ops_base_name) {
-			$va_locales = array();
-			foreach($this->opo_profile->locales->children() as $vo_locale) {
-				$va_locales[] = $vo_locale;
+			$va_locales = [];
+			foreach($this->opo_profile->locales->children() as $vo_locale) {				
+				$key = self::getAttribute($vo_locale, "lang").'_'.self::getAttribute($vo_locale, "country").'_'.self::getAttribute($vo_locale, "dialect");
+				if (isset($va_locales[$key])) { continue; }
+				$va_locales[$key] = $vo_locale;
 			}
 			foreach($this->opo_base->locales->children() as $vo_locale) {
-				$va_locales[] = $vo_locale;
+				$key = self::getAttribute($vo_locale, "lang").'_'.self::getAttribute($vo_locale, "country").'_'.self::getAttribute($vo_locale, "dialect");
+				if (isset($va_locales[$key])) { continue; }
+				$va_locales[$key] = $vo_locale;
 			}
+			$va_locales = array_values($va_locales);
 		} else {
 			$va_locales = $this->opo_profile->locales->children();
 		}
@@ -469,8 +533,10 @@ class Installer {
 			$t_locale->set('country', $vs_country);
 			$t_locale->set('language', $vs_language);
 			if($vs_dialect) $t_locale->set('dialect', $vs_dialect);
-			$t_locale->set('dont_use_for_cataloguing', (bool)$vb_dont_use_for_cataloguing);
-
+			
+			if (!is_null($vb_dont_use_for_cataloguing)) {
+				$t_locale->set('dont_use_for_cataloguing', (bool)$vb_dont_use_for_cataloguing);
+			}
 			($t_locale->getPrimaryKey() > 0) ? $t_locale->update() : $t_locale->insert();
 
 			if ($t_locale->numErrors()) {
@@ -495,7 +561,7 @@ class Installer {
 		require_once(__CA_MODELS_DIR__."/ca_list_items.php");
 
 		if($this->ops_base_name) { // "merge" profile and its base
-			$va_lists = array();
+			$va_lists = [];
 			foreach($this->opo_base->lists->children() as $vo_list) {
 				$va_lists[self::getAttribute($vo_list, "code")] = $vo_list;
 			}
@@ -506,16 +572,28 @@ class Installer {
 			$va_lists = $this->opo_profile->lists->children();
 		}
 
+		$o_trans = new Transaction();
+
 		$vn_i = 0;
 		$vn_num_lists = sizeof($va_lists);
 		foreach($va_lists as $vo_list) {
 			$vs_list_code = self::getAttribute($vo_list, "code");
+			$this->logStatus(_t('Processing list with code %1', $vs_list_code));
 			if(!($t_list = ca_lists::find(array('list_code' => $vs_list_code), array('returnAs' => 'firstModelInstance')))) {
 				$t_list = new ca_lists();
 			}
+			$t_list->setTransaction($o_trans);
+
+			if($t_list->getPrimaryKey()) {
+				$this->logStatus(_t('List %1 already exists', $vs_list_code));
+			} else {
+				$this->logStatus(_t('%1 is a new list', $vs_list_code));
+			}
+
 			$t_list->setMode(ACCESS_WRITE);
 
 			if(self::getAttribute($vo_list, "deleted") && $t_list->getPrimaryKey()) {
+				$this->logStatus(_t('Deleting list %1', $vs_list_code));
 				$t_list->delete(true);
 				continue;
 			}
@@ -545,14 +623,17 @@ class Installer {
 			if ($t_list->numErrors()) {
 				$this->addError("There was an error while inserting list {$vs_list_code}: ".join(" ",$t_list->getErrors()));
 			} else {
+				$this->logStatus(_t('Successfully inserted or updated list %1', $vs_list_code));
 				self::addLabelsFromXMLElement($t_list, $vo_list->labels, $this->opa_locales);
 				if ($t_list->numErrors()) {
 					$this->addError("There was an error while inserting list label for {$vs_list_code}: ".join(" ",$t_list->getErrors()));
 				}
 				if($vo_list->items) {
 					if(!$this->processListItems($t_list, $vo_list->items, null)) {
+						$o_trans->rollback();
 						return false;
 					}
+					$o_trans->commit();
 				}
 			}
 		}
@@ -576,6 +657,7 @@ class Installer {
 			$vs_rank = self::getAttribute($vo_item, "rank");
 			$vn_enabled = self::getAttribute($vo_item, "enabled");
 			$vn_default = self::getAttribute($vo_item, "default");
+			$vs_color = self::getAttribute($vo_item, "color");
 
 			if (!isset($vs_item_value) || !strlen(trim($vs_item_value))) {
 				$vs_item_value = $vs_item_idno;
@@ -590,22 +672,28 @@ class Installer {
 			if (!isset($vs_access)) { $vs_access = 0; }
 			if (!isset($vs_rank)) { $vs_rank = 0; }
 
+			$this->logStatus(_t('Processing list item with idno %1', $vs_item_idno));
+
 			if($vn_item_id = caGetListItemID($t_list->get('list_code'), $vs_item_idno, array('dontCache' => true))) {
+				$this->logStatus(_t('List item with idno %1 already exists', $vs_item_idno));
 				if(self::getAttribute($vo_item, "deleted")) {
+					$this->logStatus(_t('Deleting list item with idno %1', $vs_item_idno));
 					$t_item = new ca_list_items($vn_item_id);
 					$t_item->setMode(ACCESS_WRITE);
 					$t_item->delete();
 					continue;
 				}
-				$t_item = $t_list->editItem($vn_item_id, $vs_item_value, $vn_enabled, $vn_default, $pn_parent_id, $vs_item_idno, '', (int)$vs_status, (int)$vs_access, (int)$vs_rank);
+				$t_item = $t_list->editItem($vn_item_id, $vs_item_value, $vn_enabled, $vn_default, $pn_parent_id, $vs_item_idno, '', (int)$vs_status, (int)$vs_access, (int)$vs_rank, $vs_color);
 			} else {
-				$t_item = $t_list->addItem($vs_item_value, $vn_enabled, $vn_default, $pn_parent_id, $vn_type_id, $vs_item_idno, '', (int)$vs_status, (int)$vs_access, (int)$vs_rank);
+				$this->logStatus(_t('List item with idno %1 is a new item', $vs_item_idno));
+				$t_item = $t_list->addItem($vs_item_value, $vn_enabled, $vn_default, $pn_parent_id, $vn_type_id, $vs_item_idno, '', (int)$vs_status, (int)$vs_access, (int)$vs_rank, $vs_color);
 			}
 
 			if (($t_list->numErrors() > 0) || !is_object($t_item)) {
 				$this->addError("There was an error while inserting list item {$vs_item_idno}: ".join(" ",$t_list->getErrors()));
 				return false;
 			} else {
+				$this->logStatus(_t('Successfully updated/inserted list item with idno %1', $vs_item_idno));
 				$t_item->setMode(ACCESS_WRITE);
 				if($vo_item->settings) {
 					$this->_processSettings($t_item, $vo_item->settings);
@@ -661,6 +749,8 @@ class Installer {
 					$this->opo_db->query('DELETE FROM ca_metadata_type_restrictions WHERE element_id=?', $vn_element_id);
 				}
 
+				$this->logStatus(_t('Successfully nuked all type restrictions for element %1', $vs_element_code));
+
 				// handle restrictions
 				foreach($vo_element->typeRestrictions->children() as $vo_restriction) {
 					$vs_restriction_code = self::getAttribute($vo_restriction, "code");
@@ -698,6 +788,8 @@ class Installer {
 					if ($t_restriction->numErrors()) {
 						$this->addError("There was an error while inserting type restriction {$vs_restriction_code} for metadata element {$vs_element_code}: ".join("; ",$t_restriction->getErrors()));
 					}
+
+					$this->logStatus(_t('Successfully added type restriction %1 for element %2', $vs_restriction_code, $vs_element_code));
 				}
 			}
 		}
@@ -710,14 +802,23 @@ class Installer {
 
 		$vs_element_code = self::getAttribute($po_element, "code");
 
+		$this->logStatus(_t('Processing metadata element with code %1', $vs_element_code));
+
 		// try to load element by code for potential update. codes are unique, globally
 		if(!($t_md_element = ca_metadata_elements::getInstance($vs_element_code))) {
 			$t_md_element = new ca_metadata_elements();
 		}
 
+		if($t_md_element->getPrimaryKey()) {
+			$this->logStatus(_t('Metadata element with code %1 already exists', $vs_element_code));
+		} else {
+			$this->logStatus(_t('Metadata element with code %1 is new', $vs_element_code));
+		}
+
 		$t_md_element->setMode(ACCESS_WRITE);
 
 		if(self::getAttribute($po_element, 'deleted') && $t_md_element->getPrimaryKey()) {
+			$this->logStatus(_t('Deleting metadata element with code %1', $vs_element_code));
 			$t_md_element->delete(true, array('hard' => true));
 			return false; // we don't want the postprocessing to kick in. our work here is done.
 		}
@@ -741,7 +842,7 @@ class Installer {
 			$vn_list_id = null;
 		}
 		$t_md_element->set('list_id', $vn_list_id);
-		$this->_processSettings($t_md_element, $po_element->settings);
+		$this->_processSettings($t_md_element, $po_element->settings, ['settingsInfo' => $t_md_element->getAvailableSettings()]);
 
 		if($t_md_element->getPrimaryKey()) {
 			$t_md_element->update();
@@ -753,6 +854,8 @@ class Installer {
 			$this->addError("There was an error while inserting metadata element {$vs_element_code}: ".join(" ",$t_md_element->getErrors()));
 			return false;
 		}
+
+		$this->logStatus(_t('Successfully inserted/updated metadata element with code %1', $vs_element_code));
 
 		$vn_element_id = $t_md_element->getPrimaryKey();
 
@@ -825,11 +928,15 @@ class Installer {
 	public function processUserInterfaces() {
 		require_once(__CA_MODELS_DIR__."/ca_editor_uis.php");
 		require_once(__CA_MODELS_DIR__."/ca_editor_ui_screens.php");
+		require_once(__CA_MODELS_DIR__."/ca_editor_ui_bundle_placements.php");
 		require_once(__CA_MODELS_DIR__."/ca_lists.php");
 		require_once(__CA_MODELS_DIR__."/ca_list_items.php");
 		require_once(__CA_MODELS_DIR__."/ca_relationship_types.php");
 
 		$vo_dm = Datamodel::load();
+		$o_annotation_type_conf = Configuration::load(Configuration::load()->get('annotation_type_config'));
+
+		$t_placement = new ca_editor_ui_bundle_placements();
 
 		$t_list = new ca_lists();
 		$t_rel_types = new ca_relationship_types();
@@ -854,16 +961,23 @@ class Installer {
 				return false;
 			}
 
+			$this->logStatus(_t('Processing user interface with code %1', $vs_ui_code));
+
 			// model instance of UI type
 			$t_instance = $vo_dm->getInstanceByTableNum($vn_type);
 
 			// create ui row
 			if(!($t_ui = ca_editor_uis::find(array('editor_code' => $vs_ui_code, 'editor_type' =>  $vn_type), array('returnAs' => 'firstModelInstance')))) {
 				$t_ui = new ca_editor_uis();
+				$this->logStatus(_t('User interface with code %1 is new', $vs_ui_code));
+			} else {
+				$this->logStatus(_t('User interface with code %1 already exists', $vs_ui_code));
 			}
+
 			$t_ui->setMode(ACCESS_WRITE);
 
 			if(self::getAttribute($vo_ui, 'deleted') && $t_ui->getPrimaryKey()) {
+				$this->logStatus(_t('Deleting user interface with code %1', $vs_ui_code));
 				$t_ui->delete(true, array('hard' => true));
 				continue;
 			}
@@ -872,6 +986,7 @@ class Installer {
 			$t_ui->set('is_system_ui', 1);
 			$t_ui->set('editor_code', $vs_ui_code);
 			$t_ui->set('editor_type', $vn_type);
+			if ($vs_color = self::getAttribute($vo_ui, "color")) { $t_ui->set('color', $vs_color); }
 
 			if($t_ui->getPrimaryKey()) {
 				$t_ui->update();
@@ -884,10 +999,14 @@ class Installer {
 				return false;
 			}
 
+			$this->logStatus(_t('Successfully inserted/updated user interface with code %1', $vs_ui_code));
+
 			$vn_ui_id = $t_ui->getPrimaryKey();
 
 			self::addLabelsFromXMLElement($t_ui, $vo_ui->labels, $this->opa_locales);
 
+			$va_annotation_types = $o_annotation_type_conf->get('types');
+			
 			// create ui type restrictions
 			if($vo_ui->typeRestrictions) {
 				// nuke previous restrictions. there shouldn't be any if we're installing from scratch.
@@ -896,6 +1015,8 @@ class Installer {
 					$this->opo_db->query('DELETE FROM ca_editor_ui_type_restrictions WHERE ui_id=?', $vn_ui_id);
 				}
 
+				$this->logStatus(_t('Successfully nuked all type restrictions for user interface with code %1', $vs_ui_code));
+
 				foreach($vo_ui->typeRestrictions->children() as $vo_restriction) {
 					$vs_restriction_type = self::getAttribute($vo_restriction, "type");
 
@@ -903,15 +1024,41 @@ class Installer {
 						// interstitial with type restriction -> code is relationship type code
 						if($t_instance instanceof BaseRelationshipModel) {
 							$vn_type_id = $t_rel_types->getRelationshipTypeID($t_instance->tableName(),$vs_restriction_type);
+						} elseif($t_instance instanceof ca_representation_annotations) {
+							// representation annotation -> code is annotation type from annotation_types.conf
+							$vn_type_id = $va_annotation_types[$vs_restriction_type]['typeID'];
 						} else { // "normal" type restriction -> code is from actual type list
 							$vs_type_list_name = $t_instance->getFieldListCode($t_instance->getTypeFieldName());
 							$vn_type_id = $t_list->getItemIDFromList($vs_type_list_name,$vs_restriction_type);
 						}
-
-						if($vn_type_id) {
-							$t_ui->addTypeRestriction($vn_type_id);
+						
+						$t_ui->addTypeRestriction($vn_type_id, ['includeSubtypes' => self::getAttribute($vo_restriction, "includeSubtypes")]);
+					
+						$this->logStatus(_t('Successfully added type restriction %1 for user interface with code %2', $vs_restriction_type, $vs_ui_code));
+					}
+				}
+			}
+			
+			if ($vs_type_restrictions = self::getAttribute($vo_ui, "typeRestrictions")) {
+				// Copy type restrictions listed on the <placement> tag into numeric type_ids stored
+				// as settings on the placement record.
+				$va_codes = preg_split("![ ,;\|]!", $vs_type_restrictions);
+				if ($t_instance instanceof BaseRelationshipModel) {
+					$va_ids = caMakeRelationshipTypeIDList($t_instance->tableNum(), $va_codes);
+				} elseif($t_instance instanceof ca_representation_annotations) {
+					$va_ids = [];
+					foreach($va_codes as $vs_annotation_type) {
+						if(isset($va_annotation_types[$vs_annotation_type]['typeID'])) {
+							$va_ids[] = $va_annotation_types[$vs_annotation_type]['typeID'];
 						}
 					}
+				} else {
+					$va_ids = caMakeTypeIDList($t_instance->tableNum(), $va_codes, ['dontIncludeSubtypesInTypeRestriction' => true]);
+				}
+				
+				foreach($va_ids as $vn_i => $vn_type_id) {
+					$t_ui->addTypeRestriction($vn_type_id, ['includeSubtypes' => self::getAttribute($vo_ui, "includeSubtypes")]);
+					$this->logStatus(_t('Successfully added type restriction %1 for user interface with code %2', $va_codes[$vn_i], $vs_ui_code));
 				}
 			}
 
@@ -919,6 +1066,8 @@ class Installer {
 			foreach($vo_ui->screens->children() as $vo_screen) {
 				$vs_screen_idno = self::getAttribute($vo_screen, "idno");
 				$vn_is_default = self::getAttribute($vo_screen, "default");
+
+				$this->logStatus(_t('Processing screen with code %1 for user interface with code %2', $vs_screen_idno, $vs_ui_code));
 
 				$t_ui_screens = ca_editor_ui_screens::find(array(
 					'idno' => $vs_screen_idno,
@@ -928,7 +1077,14 @@ class Installer {
 				$t_ui_screens = $t_ui_screens ? $t_ui_screens : new ca_editor_ui_screens();
 				$t_ui_screens->setMode(ACCESS_WRITE);
 
+				if($t_ui_screens->getPrimaryKey()) {
+					$this->logStatus(_t('Screen with code %1 for user interface with code %2 already exists', $vs_screen_idno, $vs_ui_code));
+				} else {
+					$this->logStatus(_t('Screen with code %1 for user interface with code %2 is new', $vs_screen_idno, $vs_ui_code));
+				}
+
 				if(self::getAttribute($vo_screen, 'deleted') && $t_ui_screens->getPrimaryKey()) {
+					$this->logStatus(_t('Deleting screen with code %1 for user interface with code %2', $vs_screen_idno, $vs_ui_code));
 					$t_ui_screens->delete(true, array('hard' => true));
 					continue;
 				}
@@ -936,6 +1092,7 @@ class Installer {
 				$t_ui_screens->set('idno',$vs_screen_idno);
 				$t_ui_screens->set('ui_id', $vn_ui_id);
 				$t_ui_screens->set('is_default', $vn_is_default);
+				if ($vs_color = self::getAttribute($vo_screen, "color")) { $t_ui_screens->set('color', $vs_color); }
 
 				if($t_ui_screens->getPrimaryKey()) {
 					$t_ui_screens->update();
@@ -949,8 +1106,10 @@ class Installer {
 					return false;
 				}
 
-				self::addLabelsFromXMLElement($t_ui_screens, $vo_screen->labels, $this->opa_locales);
+				$this->logStatus(_t('Successfully updated/inserted screen with code %1 for user interface with code %2', $vs_screen_idno, $vs_ui_code));
 
+				self::addLabelsFromXMLElement($t_ui_screens, $vo_screen->labels, $this->opa_locales);
+			
 				$va_available_bundles = $t_ui_screens->getAvailableBundles(null,array('dontCache' => true));
 
 				// nuke previous placements. there shouldn't be any if we're installing from scratch.
@@ -959,12 +1118,45 @@ class Installer {
 					$this->opo_db->query('DELETE FROM ca_editor_ui_bundle_placements WHERE screen_id=?', $t_ui_screens->getPrimaryKey());
 				}
 
+				$this->logStatus(_t('Successfully nuked all bundle placements for screen with code %1 for user interface with code %2', $vs_screen_idno, $vs_ui_code));
+
 				// create ui bundle placements
 				foreach($vo_screen->bundlePlacements->children() as $vo_placement) {
 					$vs_placement_code = self::getAttribute($vo_placement, "code");
+					$vs_bundle_type_restrictions = self::getAttribute($vo_placement, "typeRestrictions");
 					$vs_bundle = trim((string)$vo_placement->bundle);
 
-					$va_settings = $this->_processSettings(null, $vo_placement->settings);
+					if ($vs_bundle_type_restrictions) {
+						// Copy type restrictions listed on the <placement> tag into numeric type_ids stored
+						// as settings on the placement record.
+						if ($t_instance instanceof BaseRelationshipModel) {
+							$va_ids = caMakeRelationshipTypeIDList($t_instance->tableNum(), preg_split("![ ,;\|]!", $vs_bundle_type_restrictions));
+						} elseif($t_instance instanceof ca_representation_annotations) {
+							$va_ids = [];
+							foreach(explode(',', $vs_bundle_type_restrictions) as $vs_annotation_type) {
+								if(isset($va_annotation_types[$vs_annotation_type]['typeID'])) {
+									$va_ids[] = $va_annotation_types[$vs_annotation_type]['typeID'];
+								}
+							}
+						} else {
+							$va_ids = caMakeTypeIDList($t_instance->tableNum(), preg_split("![ ,;\|]!", $vs_bundle_type_restrictions), ['dontIncludeSubtypesInTypeRestriction' => true]);
+						}
+						
+						if (!$vo_placement->settings) { $vo_placement->addChild("settings"); }
+						
+						foreach($va_ids as $vn_id) {
+							$o_setting = $vo_placement->settings->addChild('setting', $vn_id);
+							$o_setting->addAttribute('name', 'bundleTypeRestrictions');
+						}
+						
+						if ($vs_include_subtypes = (bool)self::getAttribute($vo_placement, "includeSubtypes")) {
+							$o_setting = $vo_placement->settings->addChild('setting', 1);
+							$o_setting->addAttribute('name', 'bundleTypeRestrictionsIncludeSubtypes');
+						}
+					}
+					
+					$va_settings = $this->_processSettings(null, $vo_placement->settings, ['settingsInfo' => array_merge($t_placement->getAvailableSettings(), is_array($va_available_bundles[$vs_bundle]['settings']) ? $va_available_bundles[$vs_bundle]['settings'] : [])]);
+					$this->logStatus(_t('Adding bundle %1 with code %2 for screen with code %3 and user interface with code %4', $vs_bundle, $vs_placement_code, $vs_screen_idno, $vs_ui_code));
 
 					$t_ui_screens->addPlacement($vs_bundle, $vs_placement_code, $va_settings, null, array('additional_settings' => $va_available_bundles[$vs_bundle]['settings']));
 				}
@@ -977,6 +1169,8 @@ class Installer {
 						$this->opo_db->query('DELETE FROM ca_editor_ui_screen_type_restrictions WHERE screen_id=?', $t_ui_screens->getPrimaryKey());
 					}
 
+					$this->logStatus(_t('Successfully nuked all type restrictions for screen with code %1 for user interface with code %2', $vs_screen_idno, $vs_ui_code));
+
 					foreach($vo_screen->typeRestrictions->children() as $vo_restriction) {
 						$vs_restriction_type = self::getAttribute($vo_restriction, "type");
 
@@ -984,17 +1178,43 @@ class Installer {
 							// interstitial with type restriction -> code is relationship type code
 							if($t_instance instanceof BaseRelationshipModel) {
 								$vn_type_id = $t_rel_types->getRelationshipTypeID($t_instance->tableName(),$vs_restriction_type);
+							} elseif($t_instance instanceof ca_representation_annotations) {
+								// representation annotation -> code is annotation type from annotation_types.conf
+								$vn_type_id = $va_annotation_types[$vs_restriction_type]['typeID'];
 							} else { // "normal" type restriction -> code is from actual type list
 								$vs_type_list_name = $t_instance->getFieldListCode($t_instance->getTypeFieldName());
 								$vn_type_id = $t_list->getItemIDFromList($vs_type_list_name,$vs_restriction_type);
 							}
 
 							if($vn_type_id) {
-								$t_ui_screens->addTypeRestriction($vn_type_id);
+								$t_ui_screens->addTypeRestriction($vn_type_id, ['includeSubtypes' => self::getAttribute($vo_restriction, "includeSubtypes")]);
 							}
+
+							$this->logStatus(_t('Successfully added type restriction %1 for screen with code %2 for user interface with code %3', $vs_restriction_type, $vs_screen_idno, $vs_ui_code));
 						}
 					}
 				}
+				
+				if ($vs_type_restrictions = self::getAttribute($vo_screen, "typeRestrictions")) {
+                    $va_codes = preg_split("![ ,;\|]!", $vs_type_restrictions);
+                    if ($t_instance instanceof BaseRelationshipModel) {
+                        $va_ids = caMakeRelationshipTypeIDList($t_instance->tableNum(), $va_codes);
+                    } elseif($t_instance instanceof ca_representation_annotations) {
+                        $va_ids = [];
+                        foreach($va_codes as $vs_annotation_type) {
+                            if(isset($va_annotation_types[$vs_annotation_type]['typeID'])) {
+                                $va_ids[] = $va_annotation_types[$vs_annotation_type]['typeID'];
+                            }
+                        }
+                    } else {
+                        $va_ids = caMakeTypeIDList($t_instance->tableNum(), $va_codes, ['dontIncludeSubtypesInTypeRestriction' => true]);
+                    }
+                
+                    foreach($va_ids as $vn_i => $vn_type_id) {
+                        $t_ui_screens->addTypeRestriction($vn_type_id, ['includeSubtypes' => self::getAttribute($vo_screen, "includeSubtypes")]);
+                        $this->logStatus(_t('Successfully added type restriction %1 for screen with code %2 for user interface with code %3', $va_codes[$vn_i], $vs_screen_idno, $vs_ui_code));
+                    }
+                }
 			}
 
 			// set user and group access
@@ -1005,7 +1225,8 @@ class Installer {
 					$vs_user = trim((string)self::getAttribute($vo_permission, "user"));
 					$vn_access = $this->_convertUserGroupAccessStringToInt(self::getAttribute($vo_permission, 'access'));
 
-					if($vn_access && $t_user->load(array('user_name' => $vs_user))) {
+					if(!$t_user->load(array('user_name' => $vs_user))) { continue; }
+					if($vn_access) {
 						$va_ui_users[$t_user->getUserID()] = $vn_access;
 					} else {
 						$this->addError("User name or access value invalid for UI {$vs_ui_code} (permission item with user name '{$vs_user}')");
@@ -1024,7 +1245,8 @@ class Installer {
 					$vs_group = trim((string)self::getAttribute($vo_permission, "group"));
 					$vn_access = $this->_convertUserGroupAccessStringToInt(self::getAttribute($vo_permission, 'access'));
 
-					if($vn_access && $t_group->load(array('code' => $vs_group))) {
+					if(!$t_group->load(array('code' => $vs_group))) { continue; }
+					if($vn_access) {
 						$va_ui_groups[$t_group->getPrimaryKey()] = $vn_access;
 					} else {
 						$this->addError("Group code or access value invalid for UI {$vs_ui_code} (permission item with group code '{$vs_group}')");
@@ -1076,6 +1298,7 @@ class Installer {
 
 		foreach($va_rel_tables as $vs_table => $vo_rel_table) {
 			$vn_table_num = $vo_dm->getTableNum($vs_table);
+			$this->logStatus(_t('Processing relationship types for table %1', $vs_table));
 
 			$t_rel_table = $vo_dm->getTableInstance($vs_table);
 
@@ -1137,6 +1360,8 @@ class Installer {
 			$vn_default = self::getAttribute($vo_type, "default");
 			$vn_rank = (int)self::getAttribute($vo_type, "rank");
 
+			$this->logStatus(_t('Processing relationship type with code %1', $vs_type_code));
+
 			$t_rel_type = ca_relationship_types::find(
 				array('type_code' => $vs_type_code, 'table_num' => $pn_table_num, 'parent_id' => $pn_parent_id),
 				array('returnAs' => 'firstModelInstance')
@@ -1145,7 +1370,14 @@ class Installer {
 			$t_rel_type = $t_rel_type ? $t_rel_type : new ca_relationship_types();
 			$t_rel_type->setMode(ACCESS_WRITE);
 
+			if($t_rel_type->getPrimaryKey()) {
+				$this->logStatus(_t('Relationship type with code %1 already exists', $vs_type_code));
+			} else {
+				$this->logStatus(_t('Relationship type with code %1 is new', $vs_type_code));
+			}
+
 			if(self::getAttribute($vo_type, "deleted") && $t_rel_type->getPrimaryKey()) {
+				$this->logStatus(_t('Deleting relationship type with code %1', $vs_type_code));
 				$t_rel_type->delete(true);
 				continue;
 			}
@@ -1167,20 +1399,59 @@ class Installer {
 				$t_rel_type->insert();
 			}
 
-			if (trim($vs_left_subtype_code = (string) $vo_type->subTypeLeft)) {
+			// As of February 2017 "typeRestrictionLeft" is preferred over "subTypeLeft"
+			if(
+				($vs_left_subtype_code = self::getAttribute($vo_type, "typeRestrictionLeft"))
+				||
+				($vs_left_subtype_code = trim((string) $vo_type->typeRestrictionLeft))
+				||
+				($vs_left_subtype_code = trim((string) $vo_type->subTypeLeft))
+			) {
 				$t_obj = $o_dm->getTableInstance($ps_left_table);
 				$vs_list_code = $t_obj->getFieldListCode($t_obj->getTypeFieldName());
 
+				$this->logStatus(_t('Adding left type restriction %1 for relationship type with code %2', $vs_left_subtype_code, $vs_type_code));
+
 				if (isset($pa_list_item_ids[$vs_list_code][$vs_left_subtype_code])) {
 					$t_rel_type->set('sub_type_left_id', $pa_list_item_ids[$vs_list_code][$vs_left_subtype_code]);
+					
+					if(
+						($vn_include_subtypes = self::getAttribute($vo_type, "includeSubtypesLeft"))
+						||
+						($vn_include_subtypes = trim((string) $vo_type->includeSubtypesLeft))
+					) {
+						$t_rel_type->set('include_subtypes_left', (bool)$vn_include_subtypes ? 1 : 0);
+					}
 					$t_rel_type->update();
 				}
 			}
-			if (trim($vs_right_subtype_code = (string) $vo_type->subTypeRight)) {
+			
+			// As of February 2017 "typeRestrictionRight" is preferred over "subTypeRight"
+			if(!($vs_right_subtype_code = trim((string) $vo_type->typeRestrictionRight))) {
+				$vs_right_subtype_code = trim((string) $vo_type->subTypeRight);
+			}
+			if(
+				($vs_right_subtype_code = self::getAttribute($vo_type, "typeRestrictionRight"))
+				||
+				($vs_right_subtype_code = trim((string) $vo_type->typeRestrictionRight))
+				||
+				($vs_right_subtype_code = trim((string) $vo_type->subTypeRight))
+			) {
 				$t_obj = $o_dm->getTableInstance($ps_right_table);
 				$vs_list_code = $t_obj->getFieldListCode($t_obj->getTypeFieldName());
+
+				$this->logStatus(_t('Adding right type restriction %1 for relationship type with code %2', $vs_right_subtype_code, $vs_type_code));
+
 				if (isset($pa_list_item_ids[$vs_list_code][$vs_right_subtype_code])) {
 					$t_rel_type->set('sub_type_right_id', $pa_list_item_ids[$vs_list_code][$vs_right_subtype_code]);
+					
+					if(
+						($vn_include_subtypes = self::getAttribute($vo_type, "includeSubtypesRight"))
+						||
+						($vn_include_subtypes = trim((string) $vo_type->includeSubtypesRight))
+					) {
+						$t_rel_type->set('include_subtypes_right', (bool)$vn_include_subtypes ? 1 : 0);
+					}
 					$t_rel_type->update();
 				}
 			}
@@ -1190,6 +1461,7 @@ class Installer {
 				return false;
 			}
 
+			$this->logStatus(_t('Successfully updated/inserted relationship type with code %1', $vs_type_code));
 
 			self::addLabelsFromXMLElement($t_rel_type, $vo_type->labels, $this->opa_locales);
 
@@ -1223,13 +1495,19 @@ class Installer {
 		}
 
 		foreach($va_roles as $vs_role_code => $vo_role) {
+			$this->logStatus(_t('Processing user role with code %1', $vs_role_code));
+
 			if(!($t_role = ca_user_roles::find(array('code' => (string)$vs_role_code), array('returnAs' => 'firstModelInstance')))) {
+				$this->logStatus(_t('User role with code %1 is new', $vs_role_code));
 				$t_role = new ca_user_roles();
+			} else {
+				$this->logStatus(_t('User role with code %1 already exists', $vs_role_code));
 			}
 
 			$t_role->setMode(ACCESS_WRITE);
 
 			if(self::getAttribute($vo_role, "deleted") && $t_role->getPrimaryKey()) {
+				$this->logStatus(_t('Deleting user role with code %1', $vs_role_code));
 				$t_role->delete(true);
 				continue;
 			}
@@ -1244,6 +1522,7 @@ class Installer {
 				foreach($vo_role->actions->children() as $vo_action) {
 					$va_actions[] = trim((string) $vo_action);
 				}
+				$this->logStatus(_t('Role actions for user role with code %1 are: %2', $vs_role_code, join(',', $va_actions)));
 			}
 			$t_role->setRoleActions($va_actions);
 			if($t_role->getPrimaryKey()) {
@@ -1257,11 +1536,14 @@ class Installer {
 				return false;
 			}
 
+			$this->logStatus(_t('Successfully updated/inserted user role with code %1', $vs_role_code));
+
 			// add bundle level ACL items
 			if($vo_role->bundleLevelAccessControl) {
 				// nuke old items
 				if(sizeof($vo_role->bundleLevelAccessControl->children()) > 0) {
 					$t_role->removeAllBundleAccessSettings();
+					$this->logStatus(_t('Successfully nuked all bundle level access control items for user role with code %1', $vs_role_code));
 				}
 
 				foreach($vo_role->bundleLevelAccessControl->children() as $vo_permission) {
@@ -1273,6 +1555,8 @@ class Installer {
 						$this->addError("Could not add bundle level access control for table '{$vs_permission_table}' and bundle '{$vs_permission_bundle}'. Check the table and bundle names.");
 						//return false;
 					}
+
+					$this->logStatus(_t('Added bundle level access control item for user role with code %1: table %2, bundle %3, access %4', $vs_role_code, $vs_permission_table, $vs_permission_bundle, $vn_permission_access));
 				}
 			}
 
@@ -1281,6 +1565,7 @@ class Installer {
 				// nuke old items
 				if(sizeof($vo_role->typeLevelAccessControl->children()) > 0) {
 					$t_role->removeAllTypeAccessSettings();
+					$this->logStatus(_t('Successfully nuked all type level access control items for user role with code %1', $vs_role_code));
 				}
 
 				foreach($vo_role->typeLevelAccessControl->children() as $vo_permission) {
@@ -1292,6 +1577,8 @@ class Installer {
 						$this->addError("Could not add type level access control for table '{$vs_permission_table}' and type '{$vs_permission_type}'. Check the table name and the type code.");
 						//return false;
 					}
+
+					$this->logStatus(_t('Added type level access control item for user role with code %1: table %2, type %3, access %4', $vs_role_code, $vs_permission_table, $vs_permission_type, $vn_permission_access));
 				}
 			}
 
@@ -1300,6 +1587,7 @@ class Installer {
 				// nuke old items
 				if(sizeof($vo_role->sourceLevelAccessControl->children()) > 0) {
 					$t_role->removeAllSourceAccessSettings();
+					$this->logStatus(_t('Successfully nuked all source level access control items for user role with code %1', $vs_role_code));
 				}
 
 				foreach($vo_role->sourceLevelAccessControl->children() as $vo_permission) {
@@ -1312,6 +1600,8 @@ class Installer {
 						$this->addError("Could not add source level access control for table '{$vs_permission_table}' and source '{$vs_permission_source}'. Check the table name and the source code.");
 						//return false;
 					}
+
+					$this->logStatus(_t('Added source level access control item for user role with code %1: table %2, source %3, access %4', $vs_role_code, $vs_permission_table, $vs_permission_source, $vn_permission_access));
 				}
 			}
 		}
@@ -1356,16 +1646,22 @@ class Installer {
 			$vs_table = self::getAttribute($vo_display, "type");
 			$vn_table_num = $vo_dm->getTableNum($vs_table);
 
+			$this->logStatus(_t('Processing display with code %1', $vs_display_code));
+
 			if ($o_config->get($vs_table.'_disable')) { continue; }
 
 			if(!($t_display = ca_bundle_displays::find(array('display_code' => $vs_display_code), array('returnAs' => 'firstModelInstance')))) {
+				$this->logStatus(_t('Display with code %1 is new', $vs_display_code));
 				$t_display = new ca_bundle_displays();
+			} else {
+				$this->logStatus(_t('Display with code %1 already exists', $vs_display_code));
 			}
 
 			$t_display->setMode(ACCESS_WRITE);
 
 			if(self::getAttribute($vo_display, "deleted") && $t_display->getPrimaryKey()) {
 				$t_display->delete(true);
+				$this->logStatus(_t('Deleting display with code %1', $vs_display_code));
 				continue;
 			}
 
@@ -1385,6 +1681,8 @@ class Installer {
 			if ($t_display->numErrors()) {
 				$this->addError("There was an error while inserting display {$vs_display_code}: ".join(" ",$t_display->getErrors()));
 			} else {
+				$this->logStatus(_t('Successfully updated/inserted display with code %1', $vs_display_code));
+
 				self::addLabelsFromXMLElement($t_display, $vo_display->labels, $this->opa_locales);
 				if ($t_display->numErrors()) {
 					$this->addError("There was an error while inserting display label for {$vs_display_code}: ".join(" ",$t_display->getErrors()));
@@ -1399,34 +1697,29 @@ class Installer {
 				// if we're updating, we expect the list of restrictions to include all restrictions!
 				if(sizeof($vo_display->typeRestrictions->children())) {
 					$this->opo_db->query('DELETE FROM ca_bundle_display_type_restrictions WHERE display_id=?', $t_display->getPrimaryKey());
+					$this->logStatus(_t('Successfully nuked all type restrictions for display with code %1', $vs_display_code));
 				}
 
 				foreach($vo_display->typeRestrictions->children() as $vo_restriction) {
-					$t_list = new ca_lists();
-					$t_list_item = new ca_list_items();
 					$vs_restriction_code = trim((string)self::getAttribute($vo_restriction, "code"));
 					$vs_type = trim((string)self::getAttribute($vo_restriction, "type"));
-
-					$t_instance = $vo_dm->getInstanceByTableNum($vn_table_num);
-					$vs_type_list_name = $t_instance->getFieldListCode($t_instance->getTypeFieldName());
-					if ($vs_type) {
-						$t_list->load(array('list_code' => $vs_type_list_name));
-						$t_list_item->load(array('list_id' => $t_list->getPrimaryKey(), 'idno' => $vs_type));
-					}
-					$vn_type_id = ($vs_type) ? $t_list_item->getPrimaryKey() : null;
-					$t_restriction = new ca_bundle_display_type_restrictions();
-					$t_restriction->setMode(ACCESS_WRITE);
-					$t_restriction->set('table_num', $vn_table_num);
-					$t_restriction->set('include_subtypes', (bool)$vo_restriction->includeSubtypes ? 1 : 0);
-					$t_restriction->set('type_id', $vn_type_id);
-					$t_restriction->set('display_id', $t_display->getPrimaryKey());
-
-					$this->_processSettings($t_restriction, $vo_restriction->settings);
-					$t_restriction->insert();
-
-					if ($t_restriction->numErrors()) {
+					
+					$t_display->addTypeRestriction(array_pop(caMakeTypeIDList($vn_table_num, [$vs_type], ['dontIncludeSubtypesInTypeRestriction' => true])), ['includeSubtypes' => (bool)$vo_restriction->includeSubtypes ? 1 : 0]);
+					
+					if ($t_display->numErrors()) {
 						$this->addError("There was an error while inserting type restriction {$vs_restriction_code} in display {$vs_display_code}: ".join("; ",$t_restriction->getErrors()));
 					}
+
+					$this->logStatus(_t('Added type restriction with code %1 and type %2 for display with code %3', $vs_restriction_code, $vs_type, $vs_display_code));
+				}
+			}
+			if ($vs_type_restrictions = self::getAttribute($vo_display, "typeRestrictions")) {
+				$va_codes = preg_split("![ ,;\|]!", $vs_type_restrictions);
+				$va_ids = caMakeTypeIDList($vn_table_num, $va_codes, ['dontIncludeSubtypesInTypeRestriction' => true]);
+				
+				foreach($va_ids as $vn_i => $vn_type_id) {
+					$t_display->addTypeRestriction($vn_type_id, ['includeSubtypes' => self::getAttribute($vo_display, "includeSubtypes")]);
+					$this->logStatus(_t('Added type restriction with type %1 for display with code %2', $va_codes[$vn_i], $vs_display_code));
 				}
 			}
 
@@ -1437,7 +1730,8 @@ class Installer {
 					$vs_user = trim((string)self::getAttribute($vo_permission, "user"));
 					$vn_access = $this->_convertUserGroupAccessStringToInt(self::getAttribute($vo_permission, 'access'));
 
-					if($vn_access && $t_user->load(array('user_name' => $vs_user))) {
+					if(!$t_user->load(array('user_name' => $vs_user))) { continue; }
+					if($vn_access) {
 						$va_display_users[$t_user->getUserID()] = $vn_access;
 					} else {
 						$this->addError("User name or access value invalid for display {$vs_display_code} (permission item with user name '{$vs_user}')");
@@ -1456,7 +1750,8 @@ class Installer {
 					$vs_group = trim((string)self::getAttribute($vo_permission, "group"));
 					$vn_access = $this->_convertUserGroupAccessStringToInt(self::getAttribute($vo_permission, 'access'));
 
-					if($vn_access && $t_group->load(array('code' => $vs_group))) {
+					if(!$t_group->load(array('code' => $vs_group))) { continue; }
+					if($vn_access) {
 						$va_display_groups[$t_group->getPrimaryKey()] = $vn_access;
 					} else {
 						$this->addError("Group code or access value invalid for display {$vs_display_code} (permission item with group code '{$vs_group}')");
@@ -1479,6 +1774,7 @@ class Installer {
 		// nuke previous placements. there shouldn't be any if we're installing from scratch.
 		// if we're updating, we expect the list of restrictions to include all restrictions!
 		if(sizeof($po_placements->children())) {
+			$this->logStatus(_t('Successfully nuked all placements for display with code %1', $t_display->get('display_code')));
 			$this->opo_db->query('DELETE FROM ca_bundle_display_placements WHERE display_id=?', $t_display->getPrimaryKey());
 		}
 
@@ -1493,6 +1789,8 @@ class Installer {
 				$this->addError("There was an error while inserting display placement {$vs_code}: ".join(" ",$t_display->getErrors()));
 				return false;
 			}
+
+			$this->logStatus(_t('Added bundle placement %1 with code %2 for display with code %3', $vs_bundle, $vs_code, $t_display->get('display_code')));
 			$vn_i++;
 		}
 
@@ -1538,12 +1836,18 @@ class Installer {
 			if ($o_config->get($vs_table.'_disable')) { continue; }
 			$vn_table_num = (int)$vo_dm->getTableNum($vs_table);
 
+			$this->logStatus(_t('Processing search form with code %1', $vs_form_code));
+
 			if(!($t_form = ca_search_forms::find(array('form_code' => (string)$vs_form_code, 'table_num' => $vn_table_num), array('returnAs' => 'firstModelInstance')))) {
 				$t_form = new ca_search_forms();
+				$this->logStatus(_t('Search form with code %1 is new', $vs_form_code));
+			} else {
+				$this->logStatus(_t('Search form with code %1 already exists', $vs_form_code));
 			}
 			$t_form->setMode(ACCESS_WRITE);
 
 			if(self::getAttribute($vo_form, "deleted") && $t_form->getPrimaryKey()) {
+				$this->logStatus(_t('Deleting search form with code %1', $vs_form_code));
 				$t_form->delete(true);
 				continue;
 			}
@@ -1564,12 +1868,45 @@ class Installer {
 			if ($t_form->numErrors()) {
 				$this->addError("There was an error while inserting search form {$vs_form_code}: ".join(" ",$t_form->getErrors()));
 			} else {
+				$this->logStatus(_t('Successfully updated/inserted form with code %1', $vs_form_code));
+
 				self::addLabelsFromXMLElement($t_form, $vo_form->labels, $this->opa_locales);
 				if ($t_form->numErrors()) {
 					$this->addError("There was an error while inserting search form label for {$vs_form_code}: ".join(" ",$t_form->getErrors()));
 				}
 				if(!$this->processSearchFormPlacements($t_form, $vo_form->bundlePlacements, null)) {
 					return false;
+				}
+			}
+			
+			if ($vo_form->typeRestrictions) {
+				// nuke previous restrictions. there shouldn't be any if we're installing from scratch.
+				// if we're updating, we expect the list of restrictions to include all restrictions!
+				if(sizeof($vo_form->typeRestrictions->children())) {
+					$this->opo_db->query('DELETE FROM ca_search_form_type_restrictions WHERE form_id=?', $t_display->getPrimaryKey());
+					$this->logStatus(_t('Successfully nuked all type restrictions for form with code %1', $vs_form_code));
+				}
+
+				foreach($vo_form->typeRestrictions->children() as $vo_restriction) {
+					$vs_restriction_code = trim((string)self::getAttribute($vo_restriction, "code"));
+					$vs_type = trim((string)self::getAttribute($vo_restriction, "type"));
+					
+					$t_form->addTypeRestriction(array_pop(caMakeTypeIDList($vn_table_num, [$vs_type], ['dontIncludeSubtypesInTypeRestriction' => true])), ['includeSubtypes' => (bool)$vo_restriction->includeSubtypes ? 1 : 0]);
+					
+					if ($t_restriction->numErrors()) {
+						$this->addError("There was an error while inserting type restriction {$vs_restriction_code} in form {$vs_form_code}: ".join("; ",$t_restriction->getErrors()));
+					}
+
+					$this->logStatus(_t('Added type restriction with code %1 and type %2 for form with code %3', $vs_restriction_code, $vs_type, $vs_form_code));
+				}
+			}
+			if ($vs_type_restrictions = self::getAttribute($vo_form, "typeRestrictions")) {
+				$va_codes = preg_split("![ ,;\|]!", $vs_type_restrictions);
+				$va_ids = caMakeTypeIDList($vn_table_num, $va_codes, ['dontIncludeSubtypesInTypeRestriction' => true]);
+				
+				foreach($va_ids as $vn_i => $vn_type_id) {
+					$t_form->addTypeRestriction($vn_type_id, ['includeSubtypes' => self::getAttribute($vo_form, "includeSubtypes")]);
+					$this->logStatus(_t('Added type restriction with type %1 for form with code %2', $va_codes[$vn_i], $vs_form_code));
 				}
 			}
 
@@ -1581,7 +1918,8 @@ class Installer {
 					$vs_user = trim((string)self::getAttribute($vo_permission, "user"));
 					$vn_access = $this->_convertUserGroupAccessStringToInt(self::getAttribute($vo_permission, 'access'));
 
-					if($vn_access && $t_user->load(array('user_name' => $vs_user))) {
+					if(!$t_user->load(array('user_name' => $vs_user))) { continue; }
+					if($vn_access) {
 						$va_form_users[$t_user->getUserID()] = $vn_access;
 					} else {
 						$this->addError("User name or access value invalid for search form {$vs_form_code} (permission item with user name '{$vs_user}')");
@@ -1600,7 +1938,8 @@ class Installer {
 					$vs_group = trim((string)self::getAttribute($vo_permission, "group"));
 					$vn_access = $this->_convertUserGroupAccessStringToInt(self::getAttribute($vo_permission, 'access'));
 
-					if($vn_access && $t_group->load(array('code' => $vs_group))) {
+					if(!$t_group->load(array('code' => $vs_group))) { continue; }
+					if($vn_access) {
 						$va_form_groups[$t_group->getPrimaryKey()] = $vn_access;
 					} else {
 						$this->addError("Group code or access value invalid for search form {$vs_form_code} (permission item with group code '{$vs_group}')");
@@ -1622,6 +1961,7 @@ class Installer {
 		// nuke previous restrictions. there shouldn't be any if we're installing from scratch.
 		// if we're updating, we expect the list of restrictions to include all restrictions!
 		if(sizeof($po_placements->children())) {
+			$this->logStatus(_t('Successfully nuked all placements for form with code %1', $t_form->get('form_code')));
 			$this->opo_db->query('DELETE FROM ca_search_form_placements WHERE form_id=?', $t_form->getPrimaryKey());
 		}
 
@@ -1637,6 +1977,8 @@ class Installer {
 				$this->addError("There was an error while inserting search form placement {$vs_code}: ".join(" ",$t_form->getErrors()));
 				return false;
 			}
+
+			$this->logStatus(_t('Added bundle placement %1 with code %2 for form with code %3', $vs_bundle, $vs_code, $t_form->get('form_code')));
 			$vn_i++;
 		}
 
@@ -1841,8 +2183,11 @@ class Installer {
 		return $ps_password;
 	}
 	# --------------------------------------------------
-	private function _processSettings($pt_instance, $po_settings_node) {
+	private function _processSettings($pt_instance, $po_settings_node, $pa_options=null) {
 		$va_settings = array();
+		
+		$pa_settings_info = caGetOption('settingsInfo', $pa_options, []);
+
 		if($po_settings_node) {
 			foreach($po_settings_node->children() as $vo_setting) {
 				// some settings like 'label' or 'add_label' have 'locale' as sub-setting
@@ -1855,6 +2200,12 @@ class Installer {
 
 				$vs_setting_name = self::getAttribute($vo_setting, "name");
 				$vs_value = (string) $vo_setting;
+				
+				
+                if (isset($pa_settings_info[$vs_setting_name]) && isset($pa_settings_info[$vs_setting_name]['deferred']) && $pa_settings_info[$vs_setting_name]['deferred']) {
+                    $this->opa_metadata_element_deferred_settings_processing[$pt_instance->get('element_code')][$vs_setting_name][] = $vs_value;
+                    continue;
+                }
 
 				if((strlen($vs_setting_name)>0) && (strlen($vs_value)>0)) { // settings need at least name and value
 					if ($vs_locale) { // settings with locale (those can't repeat)
@@ -1862,7 +2213,7 @@ class Installer {
 					} else {
 						// some settings allow multiple values under the same key, for instance restrict_to_types.
 						// in those cases $va_settings[$vs_setting_name] becomes an array of values
-						if (isset($va_settings[$vs_setting_name])) {
+						if (isset($va_settings[$vs_setting_name]) && (!isset($pa_settings_info[$vs_setting_name]) || ($pa_settings_info[$vs_setting_name]['multiple']))) {
 							if (!is_array($va_settings[$vs_setting_name])) {
 								$va_settings[$vs_setting_name] = array($va_settings[$vs_setting_name]);
 							}
@@ -1904,6 +2255,19 @@ class Installer {
 				return 2;
 			default:
 				return null;
+		}
+	}
+	# --------------------------------------------------
+	/**
+	 * @return bool
+	 */
+	protected function loggingStatus() {
+		return $this->opb_logging_status;
+	}
+	# --------------------------------------------------
+	protected function logStatus($ps_msg) {
+		if($this->loggingStatus()) {
+			$this->opo_log->logInfo($ps_msg);
 		}
 	}
 	# --------------------------------------------------

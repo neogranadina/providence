@@ -9,7 +9,7 @@
  * ----------------------------------------------------------------------
  *
  * Software by Whirl-i-Gig (http://www.whirl-i-gig.com)
- * Copyright 2009-2014 Whirl-i-Gig
+ * Copyright 2009-2016 Whirl-i-Gig
  *
  * For more information visit http://www.CollectiveAccess.org
  *
@@ -30,7 +30,7 @@
 	define('__CollectiveAccess_Installer__', 1);
 	error_reporting(E_ALL ^ E_NOTICE);
 	set_time_limit(7200);
-	ini_set("memory_limit", "256M");	
+	ini_set("memory_limit", "512M");	
 	
 	// Check existence of setup.php
 	if (!file_exists('../setup.php')) {
@@ -127,6 +127,7 @@ if (defined('__CA_ALLOW_DRAG_AND_DROP_PROFILE_UPLOAD_IN_INSTALLER__') && __CA_AL
 	<meta http-equiv="Content-type" content="text/html; charset=utf-8" />
 	<title>CollectiveAccess: Installer</title>
 	<link href="css/site.css" rel="stylesheet" type="text/css" />
+	<link rel='stylesheet' href='../assets/fontawesome/css/font-awesome.min.css' type='text/css' media='all'/>
 	
 	<script src='../assets/jquery/jquery.js' type='text/javascript'></script>
 	<script src='../assets/jquery/jquery-ui/jquery-ui.min.js' type='text/javascript'></script></head>

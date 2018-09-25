@@ -7,7 +7,7 @@
  * ----------------------------------------------------------------------
  *
  * Software by Whirl-i-Gig (http://www.whirl-i-gig.com)
- * Copyright 2005-2015 Whirl-i-Gig
+ * Copyright 2005-2016 Whirl-i-Gig
  *
  * For more information visit http://www.CollectiveAccess.org
  *
@@ -44,6 +44,8 @@ class Datamodel {
 	# --- Properties
 	# --------------------------------------------------------------------------------------------
 	private $opo_graph;
+	
+	private static $s_instance_cache = array();
 	# --------------------------------------------------------------------------------------------
 	/**
 	 * @return Datamodel
@@ -64,7 +66,7 @@ class Datamodel {
 	public function __construct($pb_dont_cache=false) {
 		// is there an on-disk cache of the internal graph?
 		if(!$pb_dont_cache && ExternalCache::contains('ca_datamodel_graph')) {
-			if ($va_graph = ExternalCache::fetch('ca_datamodel_graph')) {
+			if (is_array($va_graph = ExternalCache::fetch('ca_datamodel_graph')) && isset($va_graph['NODES']) && sizeof($va_graph['NODES'])) {
 				$this->opo_graph = new Graph($va_graph);
 				return;
 			}
@@ -72,7 +74,7 @@ class Datamodel {
 		
 		$o_config = Configuration::load();
  			
-		if ($vs_data_model_path = $o_config->get("data_model")) {
+		if ($vs_data_model_path = __CA_CONF_DIR__."/datamodel.conf") {
 			
 			$o_datamodel = Configuration::load($vs_data_model_path);
 			$this->opo_graph = new Graph();
@@ -309,6 +311,7 @@ class Datamodel {
 	 * @return null|BaseModel
 	 */
 	public function getInstanceByTableName($ps_table, $pb_use_cache=false) {
+		if($pb_use_cache && isset(Datamodel::$s_instance_cache[$ps_table])) { return Datamodel::$s_instance_cache[$ps_table]; }		// keep instances in statics for speed
 		if(!$ps_table) { return null; }
 
 		if($pb_use_cache && MemoryCache::contains($ps_table, 'DatamodelModelInstance')) {
@@ -321,7 +324,7 @@ class Datamodel {
 				require_once(__CA_MODELS_DIR__.'/'.$ps_table.'.php'); # class file name has trailing '.php'
 			}
 			$t_instance = new $ps_table;
-			if($pb_use_cache) { MemoryCache::save($ps_table, $t_instance, 'DatamodelModelInstance'); }
+			if($pb_use_cache) { MemoryCache::save($ps_table, $t_instance, 'DatamodelModelInstance'); Datamodel::$s_instance_cache[$t_instance->tableNum()] = Datamodel::$s_instance_cache[$ps_table] = $t_instance; }
 			return $t_instance;
 		} else {
 			MemoryCache::save($ps_table, null, 'DatamodelModelInstance');
@@ -336,6 +339,7 @@ class Datamodel {
 	 * @return null|BaseModel
 	 */
 	public function getInstanceByTableNum($pn_tablenum, $pb_use_cache=false) {
+		if($pb_use_cache && isset(Datamodel::$s_instance_cache[$pn_tablenum])) { return Datamodel::$s_instance_cache[$pn_tablenum]; }		// keep instances in statics for speed
 		if($vs_class_name = $this->getTableName($pn_tablenum)) {
 			if($pb_use_cache && MemoryCache::contains($vs_class_name, 'DatamodelModelInstance')) {
 				return MemoryCache::fetch($vs_class_name, 'DatamodelModelInstance');
@@ -346,7 +350,7 @@ class Datamodel {
 				require_once(__CA_MODELS_DIR__.'/'.$vs_class_name.'.php'); # class file name has trailing '.php'
 			}
 			$t_instance = new $vs_class_name;
-			if($pb_use_cache) { MemoryCache::save($vs_class_name, $t_instance, 'DatamodelModelInstance'); }
+			if($pb_use_cache) { MemoryCache::save($vs_class_name, $t_instance, 'DatamodelModelInstance'); Datamodel::$s_instance_cache[$pn_tablenum] = Datamodel::$s_instance_cache[$vs_class_name] = $t_instance; }
 			return $t_instance;
 		} else {
 			return null;
@@ -394,6 +398,45 @@ class Datamodel {
 	public function getTableProperty($pn_tablenum, $ps_property) {
 		if ($t_instance = $this->getInstanceByTableNum($pn_tablenum, true)) {
 			return $t_instance->getProperty($ps_property);
+		}
+		return null;
+	}
+	# --------------------------------------------------------------------------------------------
+	/**
+	 * Determines if table with number equal to $pn_tablenum is a relationship table
+	 *
+	 * @param int $pn_tablenum Table number
+	 * @return string Value of property or null if $pn_tablenum is invalid
+	 */
+	public function isRelationship($pn_tablenum) {
+		if ($t_instance = $this->getInstanceByTableNum($pn_tablenum, true)) {
+			return method_exists($t_instance, 'isRelationship') ? $t_instance->isRelationship() : false;
+		}
+		return null;
+	}
+	# --------------------------------------------------------------------------------------------
+	/**
+	 * Determines if table with number equal to $pn_tablenum is a self relationship table
+	 *
+	 * @param int $pn_tablenum Table number
+	 * @return string Value of property or null if $pn_tablenum is invalid
+	 */
+	public function isSelfRelationship($pn_tablenum) {
+		if ($t_instance = $this->getInstanceByTableNum($pn_tablenum, true)) {
+			return method_exists($t_instance, 'isSelfRelationship') ? $t_instance->isSelfRelationship() : false;
+		}
+		return null;
+	}
+	# --------------------------------------------------------------------------------------------
+	/**
+	 * Determines if table with number equal to $pn_tablenum is a label table
+	 *
+	 * @param int $pn_tablenum Table number
+	 * @return string Value of property or null if $pn_tablenum is invalid
+	 */
+	public function isLabel($pn_tablenum) {
+		if ($t_instance = $this->getInstanceByTableNum($pn_tablenum, true)) {
+			return is_a($t_instance, 'BaseLabel');
 		}
 		return null;
 	}

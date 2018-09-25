@@ -104,7 +104,7 @@
 		<div id="<?php print $vs_id_prefix; ?>HierarchyBrowserContainer" class="editorHierarchyBrowserContainer">
 			<div  id="<?php print $vs_id_prefix; ?>HierarchyBrowserTabs">
 				<ul>
-						<li><a href="#<?php print $vs_id_prefix; ?>HierarchyBrowserTabs-explore" onclick='_init<?php print $vs_id_prefix; ?>ExploreHierarchyBrowser();'><span>Explore</span></a></li>
+						<li><a href="#<?php print $vs_id_prefix; ?>HierarchyBrowserTabs-explore" onclick='_init<?php print $vs_id_prefix; ?>ExploreHierarchyBrowser();'><span><?php print _t('Explore'); ?></span></a></li>
 				</ul>
 		
 				<div id="<?php print $vs_id_prefix; ?>HierarchyBrowserTabs-explore" class="<?php print (isset($pa_bundle_settings['hierarchy_browse_tab_class']) && $pa_bundle_settings['hierarchy_browse_tab_class']) ? $pa_bundle_settings['hierarchy_browse_tab_class'] : "hierarchyBrowseTab"; ?>">	
@@ -132,14 +132,14 @@
 				initDataUrl: '<?php print $va_lookup_urls['ancestorList']; ?>',
 				readOnly: false,
 				initItemID: '<?php print $vn_init_id; ?>',
-				indicatorUrl: '<?php print $this->request->getThemeUrlPath(); ?>/graphics/icons/indicator.gif',
+				indicator: "<?php print caNavIcon(__CA_NAV_ICON_SPINNER__, 1); ?>",
 				dontAllowEditForFirstLevel: <?php print (in_array($t_subject->tableName(), array('ca_places', 'ca_storage_locations', 'ca_list_items', 'ca_relationship_types')) ? 'true' : 'false'); ?>,
 
 				disabledItems: '<?php print $vs_disabled_items_mode; ?>',
 				
 				editUrl: '<?php print $vs_edit_url; ?>',
-				editButtonIcon: "<?php print caNavIcon($this->request, __CA_NAV_BUTTON_RIGHT_ARROW__); ?>",
-				disabledButtonIcon: "<?php print caNavIcon($this->request, __CA_NAV_BUTTON_DOT__); ?>",
+				editButtonIcon: "<?php print caNavIcon(__CA_NAV_ICON_RIGHT_ARROW__, 1); ?>",
+				disabledButtonIcon: "<?php print caNavIcon(__CA_NAV_ICON_DOT__, 1); ?>",
 				
 				currentSelectionDisplayID: 'browseCurrentSelection',
 

@@ -7,7 +7,7 @@
  * ----------------------------------------------------------------------
  *
  * Software by Whirl-i-Gig (http://www.whirl-i-gig.com)
- * Copyright 2010-2015 Whirl-i-Gig
+ * Copyright 2010-2017 Whirl-i-Gig
  *
  * For more information visit http://www.CollectiveAccess.org
  *
@@ -28,7 +28,6 @@
  	$t_item 				= $this->getVar('t_subject');
 	$vn_item_id 			= $this->getVar('subject_id');
 	
-	$va_bundle_displays 	= $this->getVar('bundle_displays');
 	$t_display 				= $this->getVar('t_display');
 	$va_placements 			= $this->getVar("placements");
 	$va_reps 				= $t_item->getRepresentations(array("thumbnail", "small", "medium"));
@@ -36,11 +35,11 @@
 ?>
 <div id="summary" style="clear: both;">
 <?php
-	if ($vs_display_select_html = $t_display->getBundleDisplaysAsHTMLSelect('display_id', array('onchange' => 'jQuery("#caSummaryDisplaySelectorForm").submit();',  'class' => 'searchFormSelector'), array('table' => $t_item->tableNum(), 'value' => $t_display->getPrimaryKey(), 'access' => __CA_BUNDLE_DISPLAY_READ_ACCESS__, 'user_id' => $this->request->getUserID(), 'restrictToTypes' => array($t_item->getTypeID())))) {
+	if ($vs_display_select_html = $t_display->getBundleDisplaysAsHTMLSelect('display_id', array('onchange' => 'jQuery("#caSummaryDisplaySelectorForm").submit();',  'class' => 'searchFormSelector'), array('table' => $t_item->tableNum(), 'value' => $t_display->getPrimaryKey(), 'access' => __CA_BUNDLE_DISPLAY_READ_ACCESS__, 'user_id' => $this->request->getUserID(), 'restrictToTypes' => array($t_item->getTypeID()), 'context' => 'editor_summary'))) {
 ?>
 		<div id="printButton">
 			<a href="<?php print caNavUrl($this->request, $this->request->getModulePath(), $this->request->getController(), "PrintSummary", array("object_id" => $t_item->getPrimaryKey()))?>">
-				<?php print caNavIcon($this->request, __CA_NAV_BUTTON_PDF__); ?>
+				<?php print caNavIcon(__CA_NAV_ICON_PDF__, 2); ?>
 			</a>
 		</div>
 <?php
@@ -82,7 +81,7 @@
 				print "<a href='#' onclick='caMediaPanel.showPanel(\"".caNavUrl($this->request, 'editor/objects', 'ObjectEditor', 'GetMediaOverlay', array('object_id' => $vn_item_id, 'representation_id' => $va_rep['representation_id']))."\");'>".$va_rep['tags']['thumbnail']."</a>\n";
 				
 				if ($this->request->user->canDoAction('can_download_ca_object_representations')) {
-					print "<div class='download".$va_rep['representation_id']." downloadMediaContainer'>".caNavLink($this->request, caNavIcon($this->request, __CA_NAV_BUTTON_DOWNLOAD__), 'downloadMedia', 'editor/objects', 'ObjectEditor', 'DownloadMedia', array('object_id' => $vn_item_id, 'representation_id' => $va_rep['representation_id'], 'version' => 'original'))."</div>\n";
+					print "<div class='download".$va_rep['representation_id']." downloadMediaContainer'>".caNavLink($this->request, caNavIcon(__CA_NAV_ICON_DOWNLOAD__, 1), 'downloadMedia', 'editor/objects', 'ObjectEditor', 'DownloadMedia', array('object_id' => $vn_item_id, 'representation_id' => $va_rep['representation_id'], 'version' => 'original'))."</div>\n";
 				}
 				print "</div></td></tr></table>\n";
 			}else{
@@ -90,7 +89,7 @@
 				print "<div id='container".$va_rep['representation_id']."' class='oneThumbContainer' onmouseover='$(\".download".$va_rep['representation_id']."\").show();' onmouseout='$(\".download".$va_rep['representation_id']."\").hide();'>";
 				print "<a href='#' onclick='caMediaPanel.showPanel(\"".caNavUrl($this->request, 'editor/objects', 'ObjectEditor', 'GetMediaOverlay', array('object_id' => $vn_item_id, 'representation_id' => $va_rep['representation_id']))."\");'>".$va_rep['tags']['medium']."</a>\n";
 				if ($this->request->user->canDoAction('can_download_ca_object_representations')) {
-					print "<div class='download".$va_rep['representation_id']." downloadMediaContainer'>".caNavLink($this->request, caNavIcon($this->request, __CA_NAV_BUTTON_DOWNLOAD__), 'downloadMedia', 'editor/objects', 'ObjectEditor', 'DownloadMedia', array('object_id' => $vn_item_id, 'representation_id' => $va_rep['representation_id'], 'version' => 'original'))."</div>\n";
+					print "<div class='download".$va_rep['representation_id']." downloadMediaContainer'>".caNavLink($this->request, caNavIcon(__CA_NAV_ICON_DOWNLOAD__, 1), 'downloadMedia', 'editor/objects', 'ObjectEditor', 'DownloadMedia', array('object_id' => $vn_item_id, 'representation_id' => $va_rep['representation_id'], 'version' => 'original'))."</div>\n";
 				}
 				print "</div>";
 			}

@@ -55,7 +55,7 @@
 
 // Literals
 %token  number    (0|[1-9]\d*)(\.\d+)?([eE][\+\-]?\d+)?
-%token  string    \"[^"]+\"
+%token  string    \"[^"]*\"
 
 // Math
 %token  plus      \+
@@ -111,7 +111,7 @@ notin_expression:
     scalar() <notin_op> list_of_values() #notin_op
 
 list_of_values:
-    ::sqbracket_:: scalar() ( ::comma:: scalar() )+ ::_sqbracket::
+    ::sqbracket_:: scalar() ( ::comma:: scalar() )* ::_sqbracket::
 
 // we break these out by operator to make it easier to access the operator
 // in the AST. makes for an ugly grammar but for neat-er AST processing code

@@ -7,7 +7,7 @@
  * ----------------------------------------------------------------------
  *
  * Software by Whirl-i-Gig (http://www.whirl-i-gig.com)
- * Copyright 2007-2012 Whirl-i-Gig
+ * Copyright 2007-2018 Whirl-i-Gig
  *
  * For more information visit http://www.CollectiveAccess.org
  *
@@ -585,7 +585,7 @@
 		 * @param string $ps_value
 		 * @return array
 		 */
-		public function getIndexValues($ps_value=null) {
+		public function getIndexValues($ps_value=null, $pa_options=null) {
 			$vs_separator = $this->getSeparator();
 			if (!is_array($va_elements_normal_order = $this->getElements())) { $va_elements_normal_order = array(); }
 			$va_element_names_normal_order = array_keys($va_elements_normal_order);
@@ -732,9 +732,9 @@
 				if (($pa_options['show_errors']) && (isset($pa_errors[$vs_element_name]))) {
 					$vs_error_message = preg_replace("/[\"\']+/", "", $pa_errors[$vs_element_name]);
 					if ($pa_options['error_icon']) {
-						$vs_tmp .= "<a href='#'\" id='caIdno_{$vs_id_prefix}_{$ps_name}'><img src='".$pa_options['error_icon']."' border='0'/></a>";
+						$vs_tmp .= "<a href='#' id='caIdno_{$vs_id_prefix}_{$ps_name}'>".$pa_options['error_icon']."</a>";
 					} else {
-						$vs_tmp .= "<a href='#'\" id='caIdno_{$vs_id_prefix}_{$ps_name}'>["._t('Error')."]</a>";
+						$vs_tmp .= "<a href='#' id='caIdno_{$vs_id_prefix}_{$ps_name}'>["._t('Error')."]</a>";
 					}
 					TooltipManager::add("#caIdno_{$vs_id_prefix}_{$ps_name}", "<h2>"._t('Error')."</h2>{$vs_error_message}");
 				}

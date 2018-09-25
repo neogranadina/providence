@@ -53,6 +53,12 @@
 		</div>
 <?php
 	} else {
+	print "<div class='bundleSubLabel'>";
+	if(is_array($va_items) && sizeof($va_items)) {
+		print caGetPrintFormatsListAsHTMLForSetItemBundles($vs_id_prefix, $this->request, $t_set, $t_set->getItemRowIDs());
+	}
+	print "<div style='clear:both;'></div></div><!-- end bundleSubLabel -->";
+	
 ?>
 	<div class="caItemListSortControls">
 		<?php print _t('Sort by'); ?>:<br/>
@@ -84,7 +90,8 @@
 					rowIDListID: '<?php print $vs_id_prefix; ?>setRowIDList',
 					displayTemplate: <?php print (isset($va_settings['displayTemplate']) ? json_encode($va_settings['displayTemplate']) : 'null'); ?>,
 					
-					editSetItemButton: '<?php print addslashes(caNavIcon($this->request, __CA_NAV_BUTTON_EDIT__)); ?>',
+					editSetItemButton: '<?php print addslashes(caNavIcon(__CA_NAV_ICON_EDIT__, "20px")); ?>',
+					deleteSetItemButton: '<?php print addslashes(caNavIcon(__CA_NAV_ICON_DEL_BUNDLE__, "20px")); ?>',
 					
 					lookupURL: '<?php print $va_lookup_urls['search']; ?>',
 					itemInfoURL: '<?php print caNavUrl($this->request, 'manage/sets', 'SetEditor', 'GetItemInfo'); ?>',

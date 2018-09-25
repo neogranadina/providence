@@ -7,7 +7,7 @@
  * ----------------------------------------------------------------------
  *
  * Software by Whirl-i-Gig (http://www.whirl-i-gig.com)
- * Copyright 2009-2015 Whirl-i-Gig
+ * Copyright 2009-2017 Whirl-i-Gig
  *
  * For more information visit http://www.CollectiveAccess.org
  *
@@ -156,10 +156,15 @@
 			$this->opo_ca_browse_config = Configuration::load(__CA_CONF_DIR__.'/browse.conf');
 			$this->opa_browse_settings = $this->opo_ca_browse_config->getAssoc($this->ops_browse_table_name);
 
-			// Add "virtual" search facet - allows one to seed a browse with a search
+			// Add "virtual" search facet - allows seeding of a browse with a search
 			$this->opa_browse_settings['facets']['_search'] = array(
 				'label_singular' => _t('Search'),
 				'label_plural' => _t('Searches')
+			);
+			// Add "virtual" relationship types facet - allows filtering of a browse by relationship types in a specific relationships (Eg. only return records that have at least one relationship with one of the specified types)
+			$this->opa_browse_settings['facets']['_reltypes'] = array(
+				'label_singular' => _t('Relationship type'),
+				'label_plural' => _t('Relationship types')
 			);
 			$this->_processBrowseSettings();
 
@@ -253,7 +258,7 @@
 				switch($va_facet_info['type']) {
 					case 'attribute':
 						$t_element = new ca_metadata_elements();
-						if ($t_element->load(array('element_code' => $va_facet_info['element_code']))) {
+						if ($t_element->load(array('element_code' => array_pop(explode(".", $va_facet_info['element_code']))))) {
 							if (($t_element->get('datatype') == __CA_ATTRIBUTE_VALUE_LIST__) && ($vn_list_id = $t_element->get('list_id'))) {
 								if ($vn_item_id = caGetListItemID($vn_list_id, $va_facet_info['single_value'])) {
 									$va_revised_facets[$vs_facet]['single_value'] = $vn_item_id;
@@ -339,7 +344,7 @@
 		public function addCriteria($ps_facet_name, $pa_row_ids, $pa_display_strings=null) {
 			if (is_null($pa_row_ids)) { return null;}
 			if (!is_array($pa_row_ids)) { $pa_row_ids = array($pa_row_ids); }
-			if ($ps_facet_name !== '_search') {
+			if (!in_array($ps_facet_name, ['_search', '_reltypes'])) {
 				if (!($va_facet_info = $this->getInfoForFacet($ps_facet_name))) { return false; }
 				if (!$this->isValidFacetName($ps_facet_name)) { return false; }
 			}
@@ -375,15 +380,20 @@
 			if (!$this->isValidFacetName($ps_facet_name)) { return false; }
 
 			$va_criteria = $this->opo_ca_browse_cache->getParameter('criteria');
+			$va_criteria_display_strings = $this->opo_ca_browse_cache->getParameter('criteria_display_strings');
 			if (!is_array($pa_row_ids)) { $pa_row_ids = array($pa_row_ids); }
 
 			foreach($pa_row_ids as $vn_row_id) {
 				unset($va_criteria[$ps_facet_name][urldecode($vn_row_id)]);
+				unset($va_criteria_display_strings[$ps_facet_name][urldecode($vn_row_id)]);
 				if(is_array($va_criteria[$ps_facet_name]) && !sizeof($va_criteria[$ps_facet_name])) {
 					unset($va_criteria[$ps_facet_name]);
+					unset($va_criteria_display_strings[$ps_facet_name]);
 				}
 			}
+			
 			$this->opo_ca_browse_cache->setParameter('criteria', $va_criteria);
+			$this->opo_ca_browse_cache->setParameter('criteria_display_strings', $va_criteria_display_strings);
 			$this->opo_ca_browse_cache->setParameter('sort', null);
 			$this->opo_ca_browse_cache->setParameter('facet_html', null);
 
@@ -430,13 +440,17 @@
 			if ($ps_facet_name && !$this->isValidFacetName($ps_facet_name)) { return false; }
 
 			$va_criteria = $this->opo_ca_browse_cache->getParameter('criteria');
+			$va_criteria_display_strings = $this->opo_ca_browse_cache->getParameter('criteria_display_strings');
 			if($ps_facet_name) {
 				$va_criteria[$ps_facet_name] = array();
+				$va_criteria_display_strings[$ps_facet_name] = array();
 			} else {
 				$va_criteria = array();
+				$va_criteria_display_strings = array();
 			}
 
 			$this->opo_ca_browse_cache->setParameter('criteria', $va_criteria);
+			$this->opo_ca_browse_cache->setParameter('criteria_display_strings', $va_criteria_display_strings);
 			$this->opo_ca_browse_cache->setParameter('facet_html', null);
 
 			$this->opb_criteria_have_changed = true;
@@ -480,7 +494,7 @@
 
 			$va_criteria = $this->opo_ca_browse_cache->getParameter('criteria');
 			$va_criteria_display_strings = $this->opo_ca_browse_cache->getParameter('criteria_display_strings');
-
+			
 			$va_criteria_with_labels = array();
 			if($ps_facet_name) {
 				if (is_array($va_criteria_display_strings[$ps_facet_name])) {
@@ -544,14 +558,19 @@
 				# -----------------------------------------------------
 				case 'attribute':
 					$t_element = new ca_metadata_elements();
-					if (!$t_element->load(array('element_code' => $va_facet_info['element_code']))) {
+					if (!$t_element->load(array('element_code' => array_pop(explode(".", $va_facet_info['element_code']))))) {
 						return urldecode($pn_row_id);
 					}
 
 					$vn_element_id = $t_element->getPrimaryKey();
 					switch($vn_element_type = $t_element->get('datatype')) {
 						case __CA_ATTRIBUTE_VALUE_LIST__:
-							return caProcessTemplateForIDs("^ca_list_items.hierarchy.preferred_labels.name_plural", "ca_list_items", array($pn_row_id), array("delimiter" => " ➜ ", 'removeFirstItems' => 1));
+							$vs_label =  caProcessTemplateForIDs("^ca_list_items.hierarchy.preferred_labels.name_plural", "ca_list_items", array($pn_row_id), array("delimiter" => " ➜ "));
+							
+							if(is_array($va_facet_info['relabel']) && isset($va_facet_info['relabel'][$vs_label])) {
+							    $vs_label = $va_facet_info['relabel'][$vs_label];
+							}
+							return $vs_label;
 							break;
 						case __CA_ATTRIBUTE_VALUE_OBJECTS__:
 						case __CA_ATTRIBUTE_VALUE_ENTITIES__:
@@ -721,7 +740,9 @@
 					break;
 				# -----------------------------------------------------
 				default:
-					if ($ps_facet_name == '_search') { return $pn_row_id; }
+					if (in_array($ps_facet_name, ['_search', '_reltypes'])) { 
+						return $pn_row_id; 
+					}
 					return 'Invalid type';
 					break;
 				# -----------------------------------------------------
@@ -954,6 +975,8 @@
 		 *		showDeleted = if set to true, related items that have been deleted are returned. Default is false.
 		 *		limitToModifiedOn = if set returned results will be limited to rows modified within the specified date range. The value should be a date/time expression parse-able by TimeExpressionParser
 		 *		user_id = If set item level access control is performed relative to specified user_id, otherwise defaults to logged in user
+		 *		expandResultsHierarchically = expand result set items that are hierarchy roots to include their entire hierarchy. [Default is false]
+		 *		rootRecordsOnly = only return records that are the root of whatever hierarchy they are in. [Default is false]
 		 *
 		 * @return bool True on success, null if the browse could not be executed (Eg. no settings), false no error
 		 */
@@ -1015,7 +1038,7 @@
 			if (is_array($va_criteria) && (sizeof($va_criteria) > 0)) {
 				if (!$vb_results_cached) {
 
-					$va_acc = array();
+					$va_acc = $va_container_ids = [];
 					$vn_i = 0;
 					foreach($va_criteria as $vs_facet_name => $va_row_ids) {
 						$vs_target_browse_table_name = $t_item->tableName();
@@ -1023,8 +1046,12 @@
 						$vs_target_browse_table_pk = $t_item->primaryKey();
 
 						$va_facet_info = $this->getInfoForFacet($vs_facet_name);
+						
+						$vb_is_relative_to_parent = ($va_facet_info['relative_to'] && $this->_isParentRelative($va_facet_info['relative_to']));
+						
 						$va_row_ids = array_keys($va_row_ids);
-
+                            
+                        $va_sql_params = [];
 							$vs_relative_to_join = '';
 							switch($va_facet_info['type']) {
 								# -----------------------------------------------------
@@ -1045,7 +1072,7 @@
 
 									if ($va_facet_info['element_code']) {
 										$t_element = new ca_metadata_elements();
-										if (!$t_element->load(array('element_code' => $va_facet_info['element_code']))) {
+										if (!$t_element->load(array('element_code' => array_pop(explode('.', $va_facet_info['element_code']))))) {
 											break;
 										}
 										$vs_element_code = $va_facet_info['element_code'];
@@ -1083,6 +1110,15 @@
 													return null;
 													break;
 											}
+											
+											if (!is_array($va_restrict_to_types = $va_facet_info['restrict_to_types'])) { $va_restrict_to_types = array(); }
+											if(!is_array($va_restrict_to_types = $this->_convertTypeCodesToIDs($va_restrict_to_types, array('instance' => $t_rel_item)))) { $va_restrict_to_types = []; }
+											$va_restrict_to_types = array_filter($va_restrict_to_types, "strlen");
+						
+											if (!is_array($va_exclude_types = $va_facet_info['exclude_types'])) { $va_exclude_types = array(); }
+											if (!is_array($va_exclude_types = $this->_convertTypeCodesToIDs($va_exclude_types, array('instance' => $t_rel_item)))) { $va_exclude_types = []; }
+											$va_exclude_types = array_filter($va_exclude_types, "strlen");
+
 
 											$vs_cur_table = array_shift($va_path);
 
@@ -1103,22 +1139,20 @@
 												$va_wheres[] = "(".$t_item_rel->tableName().".type_id NOT IN (".join(',', $va_exclude_relationship_types)."))";
 											}
 
-											if (!(bool)$vn_state) {	// no option
-												$va_wheres[] = "(".$t_rel_item->tableName().".".$t_rel_item->primaryKey()." IS NULL)";
-												if ($t_rel_item->hasField('deleted')) {
-													$va_wheres[] = "((".$t_rel_item->tableName().".deleted = 0) OR (".$t_rel_item->tableName().".deleted IS NULL))";
-												}
-												if (isset($pa_options['checkAccess']) && is_array($pa_options['checkAccess']) && sizeof($pa_options['checkAccess']) && $t_rel_item->hasField('access')) {
-													$va_wheres[] = "((".$t_rel_item->tableName().".access NOT IN (".join(',', $pa_options['checkAccess']).")) OR ((".$t_rel_item->tableName().".".$t_rel_item->primaryKey()." IS NULL) AND (".$t_rel_item->tableName().".access IS NULL)))";
-												}
-											} else {							// yes option
-												$va_wheres[] = "(".$t_rel_item->tableName().".".$t_rel_item->primaryKey()." IS NOT NULL)";
-												if ($t_rel_item->hasField('deleted')) {
-													$va_wheres[] = "(".$t_rel_item->tableName().".deleted = 0)";
-												}
-												if (isset($pa_options['checkAccess']) && is_array($pa_options['checkAccess']) && sizeof($pa_options['checkAccess']) && $t_rel_item->hasField('access')) {
-													$va_wheres[] = "(".$t_rel_item->tableName().".access IN (".join(',', $pa_options['checkAccess'])."))";
-												}
+															// yes option
+											$va_wheres[] = "(".$t_rel_item->tableName().".".$t_rel_item->primaryKey()." IS NOT NULL)";
+											if ($t_rel_item->hasField('deleted')) {
+												$va_wheres[] = "(".$t_rel_item->tableName().".deleted = 0)";
+											}
+											if (isset($pa_options['checkAccess']) && is_array($pa_options['checkAccess']) && sizeof($pa_options['checkAccess']) && $t_rel_item->hasField('access')) {
+												$va_wheres[] = "(".$t_rel_item->tableName().".access IN (".join(',', $pa_options['checkAccess'])."))";
+											}
+
+											if ((sizeof($va_restrict_to_types) > 0) && is_object($t_rel_item)) {
+												$va_wheres[] = "(".$t_rel_item->tableName().".type_id IN (".join(',', $va_restrict_to_types)."))";
+											}
+											if ((sizeof($va_exclude_types) > 0) && is_object($t_rel_item)) {
+												$va_wheres[] = "((".$t_rel_item->tableName().".type_id NOT IN (".join(',', $va_exclude_types).")) OR (".$t_rel_item->tableName().".type_id IS NULL))";
 											}
 										}
 
@@ -1129,6 +1163,25 @@
 										if (isset($pa_options['checkAccess']) && is_array($pa_options['checkAccess']) && sizeof($pa_options['checkAccess']) && $t_item->hasField('access')) {
 											$va_wheres[] = "(".$t_item->tableName().".access IN (".join(',', $pa_options['checkAccess'])."))";
 										}
+										
+											
+                                        if ($t_item_rel && isset($va_facet_info['filter_on_interstitial']) && is_array($va_facet_info['filter_on_interstitial']) && sizeof($va_facet_info['filter_on_interstitial'])) {
+                                            foreach($va_facet_info['filter_on_interstitial'] as $vs_field_name => $va_values) {
+                                                if (!$va_values) { continue; }
+                                                if (!is_array($va_values)) { $va_values = [$va_values]; }
+                    
+                                                if (!($vn_element_id = (int)ca_metadata_elements::getElementID($vs_field_name))) { continue; }
+                                                if (!($o_value = Attribute::getValueInstance(ca_metadata_elements::getElementDatatype($vs_field_name)))) { continue; }
+                    
+                                                $va_element_value = $o_value->parseValue($va_values[0], array_merge(ca_metadata_elements::getElementSettingsForId($vs_field_name), ['list_id' => ca_metadata_elements::getElementListID($vs_field_name)], ['matchOn' => ['idno']]));
+            
+                                                $va_joins[] = "INNER JOIN ca_attributes c_a ON c_a.row_id = ".$t_item_rel->primaryKey(true)." AND c_a.table_num = ".$t_item_rel->tableNum();
+                                                $va_joins[] = "INNER JOIN ca_attribute_values c_av ON c_a.attribute_id = c_av.attribute_id";
+                                                $va_wheres[] = "c_av.element_id = {$vn_element_id} AND ".(isset($va_element_value['item_id']) ? "c_av.item_id = ?" : "c_av.value_longtext1 = ?");
+                
+                                                $va_sql_params[] = (isset($va_element_value['item_id'])) ? (int)$va_element_value['item_id'] : $va_element_value['value_longtext1'];
+                                            }
+                                        }
 
 										$vs_join_sql = join("\n", $va_joins);
 										$vs_where_sql = '';
@@ -1136,17 +1189,7 @@
 											$vs_where_sql = ' WHERE '.join(' AND ', $va_wheres);
 										}
 
-										if ($vn_i == 0) {
-											$vs_sql = "
-												SELECT ".$this->ops_browse_table_name.'.'.$t_item->primaryKey()."
-												FROM ".$this->ops_browse_table_name."
-												{$vs_relative_to_join}
-												{$vs_join_sql}
-												{$vs_where_sql}
-											";
-
-											$qr_res = $this->opo_db->query($vs_sql);
-										} else {
+										if ($vn_state) {
 											$vs_sql = "
 												SELECT ".$this->ops_browse_table_name.'.'.$t_item->primaryKey()."
 												FROM ".$this->ops_browse_table_name."
@@ -1154,11 +1197,26 @@
 												{$vs_join_sql}
 												{$vs_where_sql}";
 
-											$qr_res = $this->opo_db->query($vs_sql);
+											$qr_res = $this->opo_db->query($vs_sql, $va_sql_params);
+										} else {
+											$this->_createTempTable("_browseTmp");
+											$vs_sql = "
+												INSERT IGNORE INTO _browseTmp
+												SELECT ".$this->ops_browse_table_name.'.'.$t_item->primaryKey()."
+												FROM ".$this->ops_browse_table_name."
+												{$vs_relative_to_join}
+												{$vs_join_sql}
+												{$vs_where_sql}";
+
+											$this->opo_db->query($vs_sql, $va_sql_params);
+											
+											$qr_res = $this->opo_db->query("SELECT t.".$t_item->primaryKey()." FROM ".$this->ops_browse_table_name." t LEFT JOIN _browseTmp AS b ON ".$t_item->primaryKey()." = b.row_id WHERE b.row_id IS NULL");
+											
+											$this->_dropTempTable("_browseTmp");
 										}
+										
 										$va_acc[$vn_i] = $qr_res->getAllFieldValues($this->ops_browse_table_name.'.'.$t_item->primaryKey());
 										$vn_i++;
-
 									break;
 								# -----------------------------------------------------
 								case 'label':
@@ -1213,10 +1271,13 @@
 											$qr_res = $this->opo_db->query($vs_sql, $va_labels[$vn_row_id]);
 
 										}
-										$va_acc[$vn_i] = $qr_res->getAllFieldValues($this->ops_browse_table_name.'.'.$t_item->primaryKey());
+										
+										if(!is_array($va_acc[$vn_i])) { $va_acc[$vn_i] = []; }
+										$va_acc[$vn_i] = array_merge($va_acc[$vn_i], $qr_res->getAllFieldValues($this->ops_browse_table_name.'.'.$t_item->primaryKey()));
 
-										$vn_i++;
+										if (!caGetOption('multiple', $va_facet_info, false)) { $vn_i++; }
 									}
+									if (caGetOption('multiple', $va_facet_info, false)) { $vn_i++; }
 									break;
 								# -----------------------------------------------------
 								case 'field':
@@ -1256,15 +1317,18 @@
 
 										}
 
-										$va_acc[$vn_i] = $qr_res->getAllFieldValues($this->ops_browse_table_name.'.'.$t_item->primaryKey());
+										if(!is_array($va_acc[$vn_i])) { $va_acc[$vn_i] = []; }
+										$va_acc[$vn_i] = array_merge($va_acc[$vn_i], $qr_res->getAllFieldValues($this->ops_browse_table_name.'.'.$t_item->primaryKey()));
 
-										$vn_i++;
+										if (!caGetOption('multiple', $va_facet_info, false)) { $vn_i++; }
 									}
+									if (caGetOption('multiple', $va_facet_info, false)) { $vn_i++; }
 									break;
 								# -----------------------------------------------------
 								case 'attribute':
 									$t_element = new ca_metadata_elements();
-									if (!$t_element->load(array('element_code' => $va_facet_info['element_code']))) {
+									$va_element_code = explode(".", $va_facet_info['element_code']);
+									if (!$t_element->load(array('element_code' => array_pop($va_element_code)))) {
 										return array();
 									}
 
@@ -1279,6 +1343,10 @@
 											$vs_target_browse_table_pk = $va_relative_execute_sql_data['target_table_pk'];
 										}
 									}
+									
+									if (!is_array($va_restrict_to_types = $va_facet_info['restrict_to_types'])) { $va_restrict_to_types = array(); }
+									$va_restrict_to_types = $this->_convertTypeCodesToIDs($va_restrict_to_types, array('instance' => $t_item));
+
 
 									// TODO: check that it is a *single-value* (ie. no hierarchical ca_metadata_elements) Text or Number attribute
 									// (do we support other types as well?)
@@ -1292,27 +1360,42 @@
 										$va_attr_sql = array();
 										$va_attr_values = array(intval($vs_target_browse_table_num), $vn_element_id);
 
+										if (is_array($va_restrict_to_types) && (sizeof($va_restrict_to_types) > 0) && method_exists($t_item, "getTypeList")) {
+											$va_attr_sql[] = "(".$this->ops_browse_table_name.".type_id IN (".join(", ", $va_restrict_to_types)."))";
+										}
+										
 										if (is_array($va_value)) {
 											foreach($va_value as $vs_f => $vs_v) {
-												if ($vn_datatype == __CA_ATTRIBUTE_VALUE_LIST__) {
-													if ($vs_f != 'item_id') { continue; }
+												switch($vn_datatype) {
+													case __CA_ATTRIBUTE_VALUE_LIST__:
+														if ($vs_f != 'item_id') { continue; }
 
-													// Include sub-items
-													$t_list_item = new ca_list_items();
-													$va_item_ids = $t_list_item->getHierarchy((int)$vs_v, array('idsOnly' => true, 'includeSelf' => true));
+														// Include sub-items
+														$t_list_item = new ca_list_items();
+														$va_item_ids = $t_list_item->getHierarchy((int)$vs_v, array('idsOnly' => true, 'includeSelf' => true));
 
-													$va_item_ids[] = (int)$vs_v;
-													$va_attr_sql[] = "(ca_attribute_values.{$vs_f} IN (?))";
-													$va_attr_values[] = $va_item_ids;
-												} elseif($vn_datatype == __CA_ATTRIBUTE_VALUE_INFORMATIONSERVICE__) {
-													if($vs_f == '_dont_save') {
-														$va_attr_sql[] = "(ca_attribute_values.value_longtext1 = ?)";
-														$va_attr_values[] = $vn_row_id;
+														$va_item_ids[] = (int)$vs_v;
+														$va_attr_sql[] = "(ca_attribute_values.{$vs_f} IN (?))";
+														$va_attr_values[] = array_map(function($v) { return (int)$v; }, array_unique($va_item_ids));
 														break;
-													}
-												} else {
-													$va_attr_sql[] = "(ca_attribute_values.{$vs_f} ".(is_null($vs_v) ? " IS " : " = ")." ?)";
-													$va_attr_values[] = $vs_v;
+													case __CA_ATTRIBUTE_VALUE_INFORMATIONSERVICE__:
+														if($vs_f == '_dont_save') {
+															$va_attr_sql[] = "(ca_attribute_values.value_longtext1 = ?)";
+															$va_attr_values[] = $vn_row_id;
+															break(2);
+														}
+														break;
+													case __CA_ATTRIBUTE_VALUE_LCSH__:
+														if ($vs_f == 'value_longtext2') {
+															$va_attr_sql[] = "(ca_attribute_values.value_longtext2 = ?)";
+															$va_attr_values[] = $va_value['value_longtext2'];
+														}
+														break;
+													default:
+														$va_attr_sql[] = "(ca_attribute_values.{$vs_f} ".(is_null($vs_v) ? " IS " : " = ")." ?)";
+														$va_attr_values[] = $vs_v;
+														break;
+													
 												}
 											}
 										}
@@ -1320,40 +1403,44 @@
 										if ($vs_attr_sql = join(" AND ", $va_attr_sql)) {
 											$vs_attr_sql = " AND ".$vs_attr_sql;
 										}
-										if ($vn_i == 0) {
-											$vs_sql = "
-												SELECT ".$this->ops_browse_table_name.'.'.$t_item->primaryKey()."
-												FROM ".$this->ops_browse_table_name."
-												{$vs_relative_to_join}
-												INNER JOIN ca_attributes ON ca_attributes.row_id = {$vs_target_browse_table_name}.{$vs_target_browse_table_pk} AND ca_attributes.table_num = ?
-												INNER JOIN ca_attribute_values ON ca_attribute_values.attribute_id = ca_attributes.attribute_id
-												WHERE
-													(ca_attribute_values.element_id = ?) {$vs_attr_sql}";
-
-											$qr_res = $this->opo_db->query($vs_sql, $va_attr_values);
-										} else {
-											$vs_sql = "
-												SELECT ".$this->ops_browse_table_name.'.'.$t_item->primaryKey()."
-												FROM ".$this->ops_browse_table_name."
-												{$vs_relative_to_join}
-												INNER JOIN ca_attributes ON ca_attributes.row_id = {$vs_target_browse_table_name}.{$vs_target_browse_table_pk} AND ca_attributes.table_num = ?
-												INNER JOIN ca_attribute_values ON ca_attribute_values.attribute_id = ca_attributes.attribute_id
-												WHERE
-													(ca_attribute_values.element_id = ?) {$vs_attr_sql}";
-
-											$qr_res = $this->opo_db->query($vs_sql, $va_attr_values);
+										
+										$vs_container_sql = '';
+										if ((sizeof($va_element_code) == 1) && is_array($va_container_ids[$va_element_code[0]]) && sizeof($va_container_ids[$va_element_code[0]])) {
+										    $vs_container_sql = " AND ca_attributes.attribute_id IN (?)";
+										    $va_attr_values[] = $va_container_ids[$va_element_code[0]];
 										}
-										$va_acc[$vn_i] = $qr_res->getAllFieldValues($this->ops_browse_table_name.'.'.$t_item->primaryKey());
+										$vs_sql = "
+											SELECT ".$this->ops_browse_table_name.'.'.$t_item->primaryKey().", ca_attributes.attribute_id
+											FROM ".$this->ops_browse_table_name."
+											{$vs_relative_to_join}
+											INNER JOIN ca_attributes ON ca_attributes.row_id = ".((!$vb_is_relative_to_parent ? "{$vs_target_browse_table_name}.{$vs_target_browse_table_pk}" : "parent.{$vs_target_browse_table_pk}"))." AND ca_attributes.table_num = ?
+											INNER JOIN ca_attribute_values ON ca_attribute_values.attribute_id = ca_attributes.attribute_id
+											WHERE
+												(ca_attribute_values.element_id = ?) {$vs_attr_sql} {$vs_container_sql}";
 
-										$vn_i++;
+										$qr_res = $this->opo_db->query($vs_sql, $va_attr_values);
+										
+										if (!is_array($va_acc[$vn_i])) { $va_acc[$vn_i] = []; }
+										$va_acc[$vn_i] = array_merge($va_acc[$vn_i], $qr_res->getAllFieldValues($this->ops_browse_table_name.'.'.$t_item->primaryKey()));
+										
+										if (sizeof($va_element_code) == 1) {
+										    // is sub-element in container
+										    $va_container_ids[$va_element_code[0]] = array_unique($qr_res->getAllFieldValues('attribute_id'));
+										    $this->opo_ca_browse_cache->setParameter('container_ids', $va_container_ids[$va_element_code[0]]);
+										}
+										if (!caGetOption('multiple', $va_facet_info, false)) {
+											$vn_i++;
+										}
 									}
+									if (caGetOption('multiple', $va_facet_info, false)) { $vn_i++; }
 									break;
 								# -----------------------------------------------------
 								case 'normalizedDates':
 									$t_element = new ca_metadata_elements();
+									$va_element_code = explode('.', $va_facet_info['element_code']);
 
 									$vb_is_element = $vb_is_field = false;
-									if (!($vb_is_element = $t_element->load(array('element_code' => $va_facet_info['element_code']))) && !($vb_is_field = ($t_item->hasField($va_facet_info['element_code']) && ($t_item->getFieldInfo($va_facet_info['element_code'], 'FIELD_TYPE') === FT_HISTORIC_DATERANGE)))) {
+									if (!($vb_is_element = $t_element->load(array('element_code' => array_pop($va_element_code)))) && !($vb_is_field = ($t_item->hasField($va_facet_info['element_code']) && ($t_item->getFieldInfo($va_facet_info['element_code'], 'FIELD_TYPE') === FT_HISTORIC_DATERANGE)))) {
 										return array();
 									}
 
@@ -1390,7 +1477,17 @@
 										}
 
 										if ($vb_is_element) {
+										    $vs_container_sql = '';
+										    $va_attr_values = null;
+                                            if ((sizeof($va_element_code) == 1) && is_array($va_container_ids[$va_element_code[0]]) && sizeof($va_container_ids[$va_element_code[0]])) {
+                                                $vs_container_sql = " AND ca_attributes.attribute_id IN (?)";
+                                                $va_attr_values = $va_container_ids[$va_element_code[0]];
+                                            }
+                                            
 											if (is_null($va_dates)) {
+											    $va_params = [intval($vs_target_browse_table_num), $vn_element_id];
+											    if ($va_attr_values) { $va_params[] = $va_attr_values; }
+											    
 												$vs_sql = "
 													SELECT ".$this->ops_browse_table_name.'.'.$t_item->primaryKey()."
 													FROM ".$this->ops_browse_table_name."
@@ -1403,11 +1500,15 @@
 														(ca_attribute_values.value_decimal1 IS NULL)
 														AND
 														(ca_attribute_values.value_decimal2 IS NULL)
+														{$vs_container_sql}
 												";
-												$qr_res = $this->opo_db->query($vs_sql, intval($vs_target_browse_table_num), $vn_element_id);
+												$qr_res = $this->opo_db->query($vs_sql, $va_params);
 											} else {
+											    $va_params = [intval($vs_target_browse_table_num), $vn_element_id, $va_dates['start'], $va_dates['end'], $va_dates['start'], $va_dates['end'], $va_dates['start'], $va_dates['end']];
+												if ($va_attr_values) { $va_params[] = $va_attr_values; }
+												
 												$vs_sql = "
-													SELECT ".$this->ops_browse_table_name.'.'.$t_item->primaryKey()."
+													SELECT ".$this->ops_browse_table_name.'.'.$t_item->primaryKey().", ca_attributes.attribute_id
 													FROM ".$this->ops_browse_table_name."
 													{$vs_relative_to_join}
 													INNER JOIN ca_attributes ON ca_attributes.row_id = ".$vs_target_browse_table_name.'.'.$vs_target_browse_table_pk." AND ca_attributes.table_num = ?
@@ -1419,16 +1520,17 @@
 															(
 																(ca_attribute_values.value_decimal1 <= ?) AND
 																(ca_attribute_values.value_decimal2 >= ?) AND
-																(ca_attribute_values.value_decimal1 <> ".TEP_START_OF_UNIVERSE.") AND
-																(ca_attribute_values.value_decimal2 <> ".TEP_END_OF_UNIVERSE.") 
+																(ca_attribute_values.value_decimal1 <> ".TEP_START_OF_UNIVERSE.".0000000000) AND
+																(ca_attribute_values.value_decimal2 <> ".TEP_END_OF_UNIVERSE.".1231235959) 
 															)
 															OR
 															(ca_attribute_values.value_decimal1 BETWEEN ? AND ?)
 															OR
 															(ca_attribute_values.value_decimal2 BETWEEN ? AND ?)
 														)
+														{$vs_container_sql}
 												";
-												$qr_res = $this->opo_db->query($vs_sql, intval($vs_target_browse_table_num), $vn_element_id, $va_dates['start'], $va_dates['end'], $va_dates['start'], $va_dates['end'], $va_dates['start'], $va_dates['end']);
+												$qr_res = $this->opo_db->query($vs_sql, $va_params);
 											}
 										} else {
 											// is intrinsic
@@ -1466,16 +1568,26 @@
 											}
 										}
 
-										$va_acc[$vn_i] = $qr_res->getAllFieldValues($this->ops_browse_table_name.'.'.$t_item->primaryKey());
-										$vn_i++;
+										if(!is_array($va_acc[$vn_i] )) { $va_acc[$vn_i] = []; }
+										$va_acc[$vn_i] = array_merge($va_acc[$vn_i], $qr_res->getAllFieldValues($this->ops_browse_table_name.'.'.$t_item->primaryKey()));
+										if ($vb_is_element && (sizeof($va_element_code) == 1)) {
+										    // is sub-element in container
+										    $va_container_ids[$va_element_code[0]] = array_unique($qr_res->getAllFieldValues('attribute_id'));
+										    $this->opo_ca_browse_cache->setParameter('container_ids', $va_container_ids);
+										}
+										
+										if (!caGetOption('multiple', $va_facet_info, false)) { $vn_i++; }
 									}
+									
+									if (caGetOption('multiple', $va_facet_info, false)) { $vn_i++; }
 									break;
 								# -----------------------------------------------------
 								case 'normalizedLength':
 									$t_element = new ca_metadata_elements();
+									$va_element_code = explode('.', $va_facet_info['element_code']);
 
 									$vb_is_element = $vb_is_field = false;
-									if (!($vb_is_element = $t_element->load(array('element_code' => $va_facet_info['element_code']))) && !($vb_is_field = ($t_item->hasField($va_facet_info['element_code']) && ($t_item->getFieldInfo($va_facet_info['element_code'], 'FIELD_TYPE') === FT_HISTORIC_DATERANGE)))) {
+									if (!($vb_is_element = $t_element->load(array('element_code' => array_pop($va_element_code)))) && !($vb_is_field = ($t_item->hasField($va_facet_info['element_code']) && ($t_item->getFieldInfo($va_facet_info['element_code'], 'FIELD_TYPE') === FT_HISTORIC_DATERANGE)))) {
 										return array();
 									}
 
@@ -1520,9 +1632,16 @@
 										$vo_end = new Zend_Measure_Length($vn_end, $vs_output_units, 'en_US');
 										$vn_start_in_meters = (float)$vo_start->convertTo(Zend_Measure_Length::METER, 6, 'en_US');
 										$vn_end_in_meters = (float)$vo_end->convertTo(Zend_Measure_Length::METER, 6, 'en_US');
+										
+										$va_params = [intval($vs_target_browse_table_num), $vn_element_id, $vn_start_in_meters, $vn_end_in_meters];
+										$vs_container_sql = '';
+                                        if ((sizeof($va_element_code) == 1) && is_array($va_container_ids[$va_element_code[0]]) && sizeof($va_container_ids[$va_element_code[0]])) {
+                                            $vs_container_sql = " AND ca_attributes.attribute_id IN (?)";
+                                            $va_params[] = $va_container_ids[$va_element_code[0]];
+                                        }
 
 										$vs_sql = "
-											SELECT ".$this->ops_browse_table_name.'.'.$t_item->primaryKey()."
+											SELECT ".$this->ops_browse_table_name.'.'.$t_item->primaryKey().", ca_attributes.attribute_id
 											FROM ".$this->ops_browse_table_name."
 											{$vs_relative_to_join}
 											INNER JOIN ca_attributes ON ca_attributes.row_id = ".$vs_target_browse_table_name.'.'.$vs_target_browse_table_pk." AND ca_attributes.table_num = ?
@@ -1530,12 +1649,22 @@
 											WHERE
 												(ca_attribute_values.element_id = ?) AND
 												(ca_attribute_values.value_decimal1 BETWEEN ? AND ?)
+                                                {$vs_container_sql}
 										";
-										$qr_res = $this->opo_db->query($vs_sql, intval($vs_target_browse_table_num), $vn_element_id, $vn_start_in_meters, $vn_end_in_meters);
+										$qr_res = $this->opo_db->query($vs_sql, $va_params);
 
-										$va_acc[$vn_i] = $qr_res->getAllFieldValues($this->ops_browse_table_name.'.'.$t_item->primaryKey());
-										$vn_i++;
+										if(!is_array($va_acc[$vn_i])) { $va_acc[$vn_i] = []; }
+										$va_acc[$vn_i] = array_merge($va_acc[$vn_i], $qr_res->getAllFieldValues($this->ops_browse_table_name.'.'.$t_item->primaryKey()));
+										
+										if ($vb_is_element && (sizeof($va_element_code) == 1)) {
+										    // is sub-element in container
+										    $va_container_ids[$va_element_code[0]] = array_unique($qr_res->getAllFieldValues('attribute_id'));
+										    $this->opo_ca_browse_cache->setParameter('container_ids', $va_container_ids);
+										}
+										
+										if (!caGetOption('multiple', $va_facet_info, false)) { $vn_i++; }
 									}
+									if (caGetOption('multiple', $va_facet_info, false)) { $vn_i++; }
 									break;
 								# -----------------------------------------------------
 								case 'authority':
@@ -1545,7 +1674,7 @@
 
 									if (!is_array($va_exclude_relationship_types = $va_facet_info['exclude_relationship_types'])) { $va_exclude_relationship_types = array(); }
 									$va_exclude_relationship_types = $this->_getRelationshipTypeIDs($va_exclude_relationship_types, $va_facet_info['relationship_table']);
-
+					
 									$vn_table_num = $this->opo_datamodel->getTableNum($vs_rel_table_name);
 									$vs_rel_table_pk = $this->opo_datamodel->getTablePrimaryKeyName($vn_table_num);
 
@@ -1560,6 +1689,7 @@
 									}
 
 									foreach($va_row_ids as $vn_row_id) {
+										$va_sql_params = [];
 
 										switch(sizeof($va_path = array_keys($this->opo_datamodel->getPath($vs_target_browse_table_name, $vs_rel_table_name)))) {
 											case 3:
@@ -1580,16 +1710,34 @@
 
 										$vs_cur_table = array_shift($va_path);
 										$va_joins = array();
-
+										$va_wheres = array();
+										
 										foreach($va_path as $vs_join_table) {
 											$va_rel_info = $this->opo_datamodel->getRelationships($vs_cur_table, $vs_join_table);
 											$va_joins[] = 'INNER JOIN '.$vs_join_table.' ON '.$vs_cur_table.'.'.$va_rel_info[$vs_cur_table][$vs_join_table][0][0].' = '.$vs_join_table.'.'.$va_rel_info[$vs_cur_table][$vs_join_table][0][1]."\n";
 											$vs_cur_table = $vs_join_table;
 										}
+										
+										if ($t_item_rel && isset($va_facet_info['filter_on_interstitial']) && is_array($va_facet_info['filter_on_interstitial']) && sizeof($va_facet_info['filter_on_interstitial'])) {
+											foreach($va_facet_info['filter_on_interstitial'] as $vs_field_name => $va_values) {
+												if (!$va_values) { continue; }
+												if (!is_array($va_values)) { $va_values = [$va_values]; }
+							
+												if (!($vn_element_id = (int)ca_metadata_elements::getElementID($vs_field_name))) { continue; }
+												if (!($o_value = Attribute::getValueInstance(ca_metadata_elements::getElementDatatype($vs_field_name)))) { continue; }
+							
+												$va_element_value = $o_value->parseValue($va_values[0], array_merge(ca_metadata_elements::getElementSettingsForId($vs_field_name), ['list_id' => ca_metadata_elements::getElementListID($vs_field_name)], ['matchOn' => ['idno']]));
+					
+												$va_joins[] = "INNER JOIN ca_attributes c_a ON c_a.row_id = ".$t_item_rel->primaryKey(true)." AND c_a.table_num = ".$t_item_rel->tableNum();
+												$va_joins[] = "INNER JOIN ca_attribute_values c_av ON c_a.attribute_id = c_av.attribute_id";
+												$va_wheres[] = "c_av.element_id = {$vn_element_id} AND ".(isset($va_element_value['item_id']) ? "c_av.item_id = ?" : "c_av.value_longtext1 = ?");
+						
+												$va_sql_params[] = (isset($va_element_value['item_id'])) ? (int)$va_element_value['item_id'] : $va_element_value['value_longtext1'];
+											}
+										}
 
 										$vs_join_sql = join("\n", $va_joins);
 
-										$va_wheres = array();
 										if ((sizeof($va_restrict_to_relationship_types) > 0) && is_object($t_item_rel)) {
 											$va_wheres[] = "(".$t_item_rel->tableName().".type_id IN (".join(',', $va_restrict_to_relationship_types)."))";
 										}
@@ -1625,7 +1773,7 @@
 													{$vs_get_item_sql}
 													{$vs_where_sql}";
 
-											$qr_res = $this->opo_db->query($vs_sql);
+											$qr_res = $this->opo_db->query($vs_sql, $va_sql_params);
 										} else {
 											$vs_sql = "
 												SELECT ".$this->ops_browse_table_name.'.'.$t_item->primaryKey()."
@@ -1636,30 +1784,40 @@
 													{$vs_get_item_sql}
 													{$vs_where_sql}";
 
-											$qr_res = $this->opo_db->query($vs_sql);
+											$qr_res = $this->opo_db->query($vs_sql, $va_sql_params);
 
 										}
 
-										$va_acc[$vn_i] = $qr_res->getAllFieldValues($this->ops_browse_table_name.'.'.$t_item->primaryKey());
+										if(!is_array($va_acc[$vn_i])) { $va_acc[$vn_i] = []; }
+										$va_acc[$vn_i] = array_merge($va_acc[$vn_i], $qr_res->getAllFieldValues($this->ops_browse_table_name.'.'.$t_item->primaryKey()));
 
-										$vn_i++;
+										if (!caGetOption('multiple', $va_facet_info, false)) { $vn_i++; }
 									}
-
+									
+									if (caGetOption('multiple', $va_facet_info, false)) { $vn_i++; }
 								break;
 							# -----------------------------------------------------
 								case 'location':
 									foreach($va_row_ids as $vn_row_id) {
 										$vn_row_id = urldecode($vn_row_id);
 										$va_row_tmp = explode(":", $vn_row_id);
-										if ($vn_i == 0) {
+										
+										if ($va_row_tmp[0] == 119) { // ca_objects_x_storage_locations
+											$t_loc = new ca_storage_locations();
+											
+											if (!is_array($va_loc_ids = $t_loc->getHierarchy($va_row_tmp[2], ['returnAsArray' => true, 'includeSelf' => true, 'idsOnly' => true])) || !sizeof($va_loc_ids)) { continue; }
+											
+											array_pop($va_row_tmp);
+											$va_row_tmp[] = array_values($va_loc_ids);
+											
 											$vs_sql = "
 												SELECT ".$this->ops_browse_table_name.'.'.$t_item->primaryKey()."
 												FROM ".$this->ops_browse_table_name."
 												WHERE
 													({$this->ops_browse_table_name}.current_loc_class = ?)"
-														.((sizeof($va_row_tmp) > 1) ? " AND ({$this->ops_browse_table_name}.current_loc_subclass = ?)" : "")
-														.((sizeof($va_row_tmp) > 2) ? " AND ({$this->ops_browse_table_name}.current_loc_id = ?)" : "");
-
+														.((sizeof($va_row_tmp) == 2) ? " AND ({$this->ops_browse_table_name}.current_loc_id IN (?))" : "")
+														.((sizeof($va_row_tmp) > 2) ? " AND ({$this->ops_browse_table_name}.current_loc_subclass = ?) AND ({$this->ops_browse_table_name}.current_loc_id IN (?))" : "");
+												
 											$qr_res = $this->opo_db->query($vs_sql, $va_row_tmp);
 										} else {
 											$vs_sql = "
@@ -1669,14 +1827,15 @@
 													({$this->ops_browse_table_name}.current_loc_class = ?)"
 														.((sizeof($va_row_tmp) > 1) ? " AND ({$this->ops_browse_table_name}.current_loc_subclass = ?)" : "")
 														.((sizeof($va_row_tmp) > 2) ? " AND ({$this->ops_browse_table_name}.current_loc_id = ?)" : "");
-
 											$qr_res = $this->opo_db->query($vs_sql, $va_row_tmp);
-
 										}
-										$va_acc[$vn_i] = $qr_res->getAllFieldValues($this->ops_browse_table_name.'.'.$t_item->primaryKey());
+										
+										if(!is_array($va_acc[$vn_i])) { $va_acc[$vn_i] = []; }
+										$va_acc[$vn_i] = array_merge($va_acc[$vn_i], $qr_res->getAllFieldValues($this->ops_browse_table_name.'.'.$t_item->primaryKey()));
 
-										$vn_i++;
+										if (!caGetOption('multiple', $va_facet_info, false)) { $vn_i++; }
 									}
+									if (caGetOption('multiple', $va_facet_info, false)) { $vn_i++; }
 									break;
 							# -----------------------------------------------------
 								case 'fieldList':
@@ -1715,10 +1874,13 @@
 											$qr_res = $this->opo_db->query($vs_sql, $vn_row_id);
 
 										}
-										$va_acc[$vn_i] = $qr_res->getAllFieldValues($this->ops_browse_table_name.'.'.$t_item->primaryKey());
+										
+										if(!is_array($va_acc[$vn_i])) { $va_acc[$vn_i] = []; }
+										$va_acc[$vn_i] = array_merge($va_acc[$vn_i], $qr_res->getAllFieldValues($this->ops_browse_table_name.'.'.$t_item->primaryKey()));
 
-										$vn_i++;
+										if (!caGetOption('multiple', $va_facet_info, false)) { $vn_i++; }
 									}
+									if (caGetOption('multiple', $va_facet_info, false)) { $vn_i++; }
 									break;
 
 							# -----------------------------------------------------
@@ -1762,10 +1924,13 @@
 										$qr_res = $this->opo_db->query($vs_sql, $vn_row_id);
 
 									}
-									$va_acc[$vn_i] = $qr_res->getAllFieldValues($this->ops_browse_table_name.'.'.$t_item->primaryKey());
+									
+									if(!is_array($va_acc[$vn_i])) { $va_acc[$vn_i] = []; }
+									$va_acc[$vn_i] = array_merge($va_acc[$vn_i], $qr_res->getAllFieldValues($this->ops_browse_table_name.'.'.$t_item->primaryKey()));
 
-									$vn_i++;
+									if (!caGetOption('multiple', $va_facet_info, false)) { $vn_i++; }
 								}
+								if (caGetOption('multiple', $va_facet_info, false)) { $vn_i++; }
 								break;
 							# -----------------------------------------------------
 							case 'checkouts':
@@ -1834,43 +1999,77 @@
 									}
 
 									$qr_res = $this->opo_db->query($vs_sql.$vs_user_sql, $va_params);
-									$va_acc[$vn_i] = $qr_res->getAllFieldValues('ca_objects.object_id');
+									
+									if(!is_array($va_acc[$vn_i])) { $va_acc[$vn_i] = []; }
+									$va_acc[$vn_i] = array_merge($va_acc[$vn_i], $qr_res->getAllFieldValues('ca_objects.object_id'));
 
-									$vn_i++;
+									if (!caGetOption('multiple', $va_facet_info, false)) { $vn_i++; }
 								}
+								if (caGetOption('multiple', $va_facet_info, false)) { $vn_i++; }
 								break;
 							# -----------------------------------------------------
 							default:
-								// handle "search" criteria - search engine queries that can be browsed
-								if ($vs_facet_name === '_search') {
-									if (!($o_search = caGetSearchInstance($this->ops_browse_table_name))) {
-										$this->postError(2900, _t("Invalid search type"), "BrowseEngine->execute()");
+								switch($vs_facet_name) {
+									case '_search':
+										// handle "search" criteria - search engine queries that can be browsed
+										if (!($o_search = caGetSearchInstance($this->ops_browse_table_name))) {
+											$this->postError(2900, _t("Invalid search type"), "BrowseEngine->execute()");
+											break;
+										}
+
+										if (is_array($va_type_ids = $this->getTypeRestrictionList()) && sizeof($va_type_ids)) {
+											$o_search->setTypeRestrictions($va_type_ids);
+										}
+										if (is_array($va_source_ids = $this->getSourceRestrictionList()) && sizeof($va_source_ids)) {
+											$o_search->setSourceRestrictions($va_source_ids);
+										}
+										$va_options = $pa_options;
+										unset($va_options['sort']);					// browse engine takes care of sort so there is no reason to waste time having the search engine do so
+										$va_options['filterNonPrimaryRepresentations'] = true;	// filter out non-primary representations in ca_objects results to save (a bit) of time
+
+										$o_search->setOption('strictPhraseSearching', caGetOption('strictPhraseSearching', $va_options, true));
+										
+										if (sizeof($va_row_ids) > 1) {
+											// only allow singleton wildcards without other searches, otherwise we're wasting our time
+											$va_row_ids = array_filter($va_row_ids, function($a) { return !($a === '*'); });
+										}
+										$qr_res = $o_search->search(join(" AND ", $va_row_ids), $va_options);
+
+										$va_acc[$vn_i] = $qr_res->getPrimaryKeyValues();
+										$vn_i++;
 										break;
-									}
-
-									if (is_array($va_type_ids = $this->getTypeRestrictionList()) && sizeof($va_type_ids)) {
-										$o_search->setTypeRestrictions($va_type_ids);
-									}
-									if (is_array($va_source_ids = $this->getSourceRestrictionList()) && sizeof($va_source_ids)) {
-										$o_search->setSourceRestrictions($va_source_ids);
-									}
-									$va_options = $pa_options;
-									unset($va_options['sort']);					// browse engine takes care of sort so there is no reason to waste time having the search engine do so
-									$va_options['filterNonPrimaryRepresentations'] = true;	// filter out non-primary representations in ca_objects results to save (a bit) of time
-
-									$o_search->setOption('strictPhraseSearching', caGetOption('strictPhraseSearching', $va_options, true));
-									$qr_res = $o_search->search($va_row_ids[0], $va_options);
-
-									$va_acc[$vn_i] = $qr_res->getPrimaryKeyValues();
-									$vn_i++;
-								} else {
-									$this->postError(2900, _t("Invalid criteria type"), "BrowseEngine->execute()");
+									case '_reltypes':
+										$va_acc[$vn_i] = [];
+										foreach($va_row_ids as $vs_tmp) {
+											$va_tmp = explode(":", $vs_tmp);
+											if (!($t_target = $this->opo_datamodel->getInstanceByTableName($va_tmp[0], true))) { break; }
+											
+											$va_path_to_target = array_keys($this->opo_datamodel->getPath($vs_target_browse_table_name, $t_target->tableName()));
+											
+											if (is_array($va_path_to_target) && (sizeof($va_path_to_target) == 3)) {
+												if (!($t_target_rel = $this->opo_datamodel->getInstanceByTableName($va_path_to_target[1], true)) || !$t_target_rel->isRelationship() || !$t_target_rel->hasField('type_id')) { break; }
+												$va_ids_from_rel = array_unique($this->_getRelationshipTypeIDs(explode(",", $va_tmp[1]), $va_path_to_target[1]));
+												if (is_array($va_ids_from_rel) && (sizeof($va_ids_from_rel) > 0)) {
+													$qr_res = $this->opo_db->query("SELECT DISTINCT {$vs_target_browse_table_pk} FROM ".$va_path_to_target[1]." WHERE type_id IN (?)", [$va_ids_from_rel]);
+													$va_acc[$vn_i] = array_merge($va_acc[$vn_i], $qr_res->getAllFieldValues($vs_target_browse_table_pk));
+												}
+											}
+										}
+										$vn_i++;
+										break;
+									default:
+										$this->postError(2900, _t("Invalid criteria type"), "BrowseEngine->execute()");
+										break;
 								}
 								break;
 							# -----------------------------------------------------
 						}
 					}
 
+					// preserve sort order using first facet if first facet is a search
+					// (needed for relevance sort)
+					$vb_preserve_order = (bool)(array_keys($va_criteria)[0]== '_search');
+					
 					foreach($va_acc as $vn_i => $va_hits) {
 						$va_acc[$vn_i] = array_flip($va_hits);
 					}
@@ -1879,6 +2078,23 @@
 						if (is_null($vn_smallest_list_index)) { $vn_smallest_list_index = $vn_i; continue; }
 						if (sizeof($va_hits) < sizeof($va_acc[$vn_smallest_list_index])) { $vn_smallest_list_index = $vn_i; }
 					}
+					
+					if (caGetOption('expandResultsHierarchically', $pa_options, false) && ($vs_hier_id_fld = $this->opo_datamodel->getTableProperty($this->ops_browse_table_name, 'HIERARCHY_ID_FLD'))) { 
+
+                       foreach($va_acc as $vn_i => $va_acc_content) {
+                            if(!sizeof($va_acc_content)) { continue; }
+                            $qr_expand =  $this->opo_db->query("
+                                SELECT ".$this->ops_browse_table_name.".".$t_item->primaryKey()." 
+                                FROM ".$this->ops_browse_table_name."
+                                WHERE
+                                    {$vs_hier_id_fld} IN (?)
+                            ",[array_keys($va_acc_content)]);
+
+                            if(is_array($va_expanded_res = $qr_expand->getAllFieldValues($t_item->primaryKey())) && sizeof($va_expanded_res)) {
+                                $va_acc[$vn_i] = array_flip($va_expanded_res);
+                            }
+                        }
+                    }
 
 					$va_res = array();
 					$va_acc_indices = array_keys($va_acc);
@@ -1891,8 +2107,16 @@
 							$va_res[$vn_row_id] = true;
 						}
 					}
+					
+					if ($vb_preserve_order) {
+						$va_tmp = [];
+						foreach(array_keys($va_acc[0]) as $vn_x) {
+							if (isset($va_res[$vn_x])) { $va_tmp[] = $vn_x; }
+						}
+						$va_res = array_flip($va_tmp);
+					}
+					
 					if (sizeof($va_res)) {
-
 						$vs_filter_join_sql = $vs_filter_where_sql = '';
 						$va_wheres = array();
 						$va_joins = array();
@@ -1913,6 +2137,10 @@
 
 						if ((!isset($pa_options['showDeleted']) || !$pa_options['showDeleted']) && $t_item->hasField('deleted')) {
 							$va_wheres[] = "(".$this->ops_browse_table_name.".deleted = 0)";
+						}
+						
+						if ((isset($pa_options['rootRecordsOnly']) && $pa_options['rootRecordsOnly']) && $t_item->hasField('parent_id')) {
+							$va_wheres[] = "(".$this->ops_browse_table_name.".parent_id IS NULL)";
 						}
 
 						if ((isset($pa_options['limitToModifiedOn']) && $pa_options['limitToModifiedOn'])) {
@@ -1952,15 +2180,15 @@
 							FROM ".$this->ops_browse_table_name."
 							{$vs_filter_join_sql}
 							{$vs_filter_where_sql}
-						", array(array_keys($va_res)));
+						", array($va_possible_values = array_keys($va_res)));
 
-						$va_results = $qr_res->getAllFieldValues($t_item->primaryKey());
+						$va_results = $vb_preserve_order ? array_intersect($va_possible_values, $qr_res->getAllFieldValues($t_item->primaryKey())) : $qr_res->getAllFieldValues($t_item->primaryKey());
 
 						if ((!isset($pa_options['dontFilterByACL']) || !$pa_options['dontFilterByACL']) && $this->opo_config->get('perform_item_level_access_checking') && method_exists($t_item, "supportsACL") && $t_item->supportsACL()) {
 							$va_results = $this->filterHitsByACL($va_results, $this->opn_browse_table_num, $vn_user_id, __CA_ACL_READONLY_ACCESS__);
 						}
 
-						$this->opo_ca_browse_cache->setResults($va_results);
+						$this->opo_ca_browse_cache->setResults(array_values($va_results));
 						$vb_need_to_save_in_cache = true;
 					} else {
 						// No results for some reason - we're here because we don't want to throw a SQL error
@@ -1985,6 +2213,9 @@
 
 					if ((!isset($pa_options['showDeleted']) || !$pa_options['showDeleted']) && $t_item->hasField('deleted')) {
 						$va_wheres[] = "(".$this->ops_browse_table_name.".deleted = 0)";
+					}
+					if ((isset($pa_options['rootRecordsOnly']) && $pa_options['rootRecordsOnly']) && $t_item->hasField('parent_id')) {
+						$va_wheres[] = "(".$this->ops_browse_table_name.".parent_id IS NULL)";
 					}
 
 					if ((isset($pa_options['limitToModifiedOn']) && $pa_options['limitToModifiedOn'])) {
@@ -2085,7 +2316,12 @@
 				//
 
 				foreach($va_facets as $vs_facet_name) {
-					if ($this->getFacet($vs_facet_name, array_merge($pa_options, array('checkAvailabilityOnly' => true)))) {
+					$va_facet_info = $this->getInfoForFacet($vs_facet_name);
+					if (
+						(isset($va_criteria[$vs_facet_name]) && isset($va_facet_info['multiple']) && $va_facet_info['multiple']) // facets supporting multiple selection always have content
+						|| 
+						$this->getFacet($vs_facet_name, array_merge($pa_options, array('checkAvailabilityOnly' => true)))
+					) {
 						$va_facets_with_content[$vs_facet_name] = true;
 					}
 				}
@@ -2236,7 +2472,7 @@
 						}
 
 						foreach($va_groups as $vs_group) {
-							$vs_group = unicode_ucfirst($vs_group);
+							$vs_group = caUcFirstUTF8Safe($vs_group);
 							$vs_alpha_key = '';
 							foreach($va_label_order_by_fields as $vs_f) {
 								$vs_alpha_key .= $va_item[$vs_f];
@@ -2334,8 +2570,13 @@
 
 			$t_subject = $this->getSubjectInstance();
 
+			$vb_is_relative_to_parent = false;
 			if ($va_facet_info['relative_to']) {
-				$vs_browse_table_name = $va_facet_info['relative_to'];
+				if ($this->_isParentRelative($va_facet_info['relative_to'])) {
+					$vb_is_relative_to_parent = true;
+				} else {
+					$vs_browse_table_name = $va_facet_info['relative_to'];
+				}
 				$vs_browse_table_num = $this->opo_datamodel->getTableNum($vs_browse_table_name);
 			}
 
@@ -2378,7 +2619,16 @@
 			// Values to exclude from list attributes and authorities; can be idnos or ids
 			$va_exclude_values = caGetOption('exclude_values', $va_facet_info, array(), array('castTo' => 'array'));
 
-			$va_results = $this->opo_ca_browse_cache->getResults();
+			// Force all facet content when facet supports multiple selection
+			$va_full_criteria = $this->getCriteria();
+			if (isset($va_facet_info['multiple']) && $va_facet_info['multiple'] && isset($va_full_criteria[$ps_facet_name])) { $pa_options['returnFullFacet'] = true; }
+			
+			if (caGetOption('returnFullFacet', $pa_options, false)) {
+			    $va_results = null; $va_container_ids = null;
+			} else {
+			    $va_results = $this->opo_ca_browse_cache->getResults();
+			    if (!is_array($va_container_ids = $this->opo_ca_browse_cache->getParameter('container_ids'))) { $va_container_ids = []; }
+			}
 
 			$vb_single_value_is_present = false;
 			$vs_single_value = isset($va_facet_info['single_value']) ? $va_facet_info['single_value'] : null;
@@ -2413,7 +2663,7 @@
 
 					if ($va_facet_info['element_code']) {
 						$t_element = new ca_metadata_elements();
-						if (!$t_element->load(array('element_code' => $va_facet_info['element_code']))) {
+						if (!$t_element->load(array('element_code' => array_pop(explode('.', $va_facet_info['element_code']))))) {
 							break;
 						}
 						$vs_element_code = $va_facet_info['element_code'];
@@ -2497,21 +2747,21 @@
 								}
 							} else {
 								$vs_sql = "
-									SELECT ".$vs_browse_table_name.'.'.$t_item->primaryKey()."
+									SELECT DISTINCT ".$vs_browse_table_name.'.'.$t_item->primaryKey()."
 									FROM ".$vs_browse_table_name."
 									{$vs_join_sql}
-									{$vs_where_sql}
-								";
+									{$vs_where_sql}";
 								//print "$vs_sql<hr>";
 								$qr_res = $this->opo_db->query($vs_sql);
 								if ($qr_res->numRows() > 0) {
-									$va_facet[$vs_state_name] = $va_state_info;
+									$va_facet[$vs_state_name] = array_merge($va_state_info, ['content_count' => $qr_res->numRows()]);
 								} else {
 									return array();		// if either option in a "has" facet fails then don't show the facet
 								}
 							}
 						}
 					} else {
+					
 						$vs_rel_table_name = $va_facet_info['table'];
 						if (!is_array($va_restrict_to_relationship_types = $va_facet_info['restrict_to_relationship_types'])) { $va_restrict_to_relationship_types = array(); }
 						$va_restrict_to_relationship_types = $this->_getRelationshipTypeIDs($va_restrict_to_relationship_types, $va_facet_info['relationship_table']);
@@ -2538,6 +2788,14 @@
 								return null;
 								break;
 						}
+						
+						if (!is_array($va_restrict_to_types = $va_facet_info['restrict_to_types'])) { $va_restrict_to_types = array(); }
+						if(!is_array($va_restrict_to_types = $this->_convertTypeCodesToIDs($va_restrict_to_types, array('instance' => $t_rel_item)))) { $va_restrict_to_types = []; }
+						$va_restrict_to_types = array_filter($va_restrict_to_types, "strlen");
+						
+						if (!is_array($va_exclude_types = $va_facet_info['exclude_types'])) { $va_exclude_types = array(); }
+						if (!is_array($va_exclude_types = $this->_convertTypeCodesToIDs($va_exclude_types, array('instance' => $t_rel_item)))) { $va_exclude_types = []; }
+						$va_exclude_types = array_filter($va_exclude_types, "strlen");
 
 						$vs_cur_table = array_shift($va_path);
 						$va_joins_init = array();
@@ -2553,15 +2811,16 @@
 						foreach($va_facet_values as $vs_state_name => $va_state_info) {
 							$va_wheres = array();
 							$va_joins = $va_joins_init;
-
-
+							
 							if (!(bool)$va_state_info['id']) {	// no option
+								$vn_num_wheres = sizeof($va_wheres);
 								$va_wheres[] = "(".$t_rel_item->tableName().".".$t_rel_item->primaryKey()." IS NULL)";
+								
 								if ($t_rel_item->hasField('deleted')) {
 									$va_wheres[] = "((".$t_rel_item->tableName().".deleted = 0) OR (".$t_rel_item->tableName().".deleted IS NULL))";
 								}
 								if (isset($pa_options['checkAccess']) && is_array($pa_options['checkAccess']) && sizeof($pa_options['checkAccess']) && $t_rel_item->hasField('access')) {
-									$va_wheres[] = "((".$t_rel_item->tableName().".access NOT IN (".join(',', $pa_options['checkAccess']).")) OR (".$t_rel_item->tableName().".access IS NULL))";
+									$va_wheres[] = "((".$t_rel_item->tableName().".access IN (".join(',', $pa_options['checkAccess']).")) OR (".$t_rel_item->tableName().".access IS NULL))";
 								}
 
 								if ((sizeof($va_restrict_to_relationship_types) > 0) && is_object($t_item_rel)) {
@@ -2570,7 +2829,18 @@
 								if ((sizeof($va_exclude_relationship_types) > 0) && is_object($t_item_rel)) {
 									$va_wheres[] = "(".$t_item_rel->tableName().".type_id IN (".join(',', $va_exclude_relationship_types)."))";
 								}
+								
+								if (sizeof($va_restrict_to_types)) {
+									$va_wheres[] = "((".$t_rel_item->tableName().".type_id NOT IN (".join(',', $va_restrict_to_types).")) OR (".$t_rel_item->tableName().".type_id IS NULL))";
+								}
+								
+								if (sizeof($va_exclude_types)) {
+									$va_wheres[] = "(".$t_rel_item->tableName().".type_id IN (".join(',', $va_exclude_types).")) ";
+								}
 
+								if (sizeof($va_wheres) == $vn_num_wheres) {
+									$va_wheres[] = "(".$t_rel_item->tableName().".".$t_rel_item->primaryKey()." IS NULL)";
+								}
 							} else {							// yes option
 								$va_wheres[] = "(".$t_rel_item->tableName().".".$t_rel_item->primaryKey()." IS NOT NULL)";
 								if ($t_rel_item->hasField('deleted')) {
@@ -2585,6 +2855,14 @@
 								}
 								if ((sizeof($va_exclude_relationship_types) > 0) && is_object($t_item_rel)) {
 									$va_wheres[] = "(".$t_item_rel->tableName().".type_id NOT IN (".join(',', $va_exclude_relationship_types)."))";
+								}
+								
+								if (sizeof($va_restrict_to_types)) {
+									$va_wheres[] = "(".$t_rel_item->tableName().".type_id IN (".join(',', $va_restrict_to_types)."))";
+								}
+								
+								if (sizeof($va_exclude_types)) {
+									$va_wheres[] = "((".$t_rel_item->tableName().".type_id NOT IN (".join(',', $va_exclude_types).")) OR (".$t_rel_item->tableName().".type_id IS NULL))";
 								}
 							}
 
@@ -2649,15 +2927,15 @@
 								}
 							} else {
 								$vs_sql = "
-									SELECT ".$vs_browse_table_name.'.'.$t_item->primaryKey()."
+									SELECT DISTINCT ".$vs_browse_table_name.'.'.$t_item->primaryKey()."
 									FROM ".$vs_browse_table_name."
 									{$vs_join_sql}
-									{$vs_where_sql}
-								";
+									{$vs_where_sql}";
+									
 								//print "$vs_sql<hr>";
 								$qr_res = $this->opo_db->query($vs_sql);
 								if ($qr_res->numRows() > 0) {
-									$va_facet[$vs_state_name] = $va_state_info;
+									$va_facet[$vs_state_name] = array_merge($va_state_info, ['content_count' => $qr_res->numRows()]);
 								} else {
 									return array();		// if either option in a "has" facet fails then don't show the facet
 								}
@@ -2676,13 +2954,23 @@
 					if (!($t_item = $this->opo_datamodel->getInstanceByTableName($vs_browse_table_name, true))) { break; }
 					if (!($t_label = $t_item->getLabelTableInstance())) { break; }
 					if (!is_array($va_restrict_to_types = $va_facet_info['restrict_to_types'])) { $va_restrict_to_types = array(); }
-
+					
+					if(sizeof($va_label_order_by_fields = isset($va_facet_info['order_by_label_fields']) ? $va_facet_info['order_by_label_fields'] : [])) {
+					    $va_label_order_by_fields = array_map(function($v) { return "l.{$v}"; }, $va_label_order_by_fields);
+					} else {
+					    $va_label_order_by_fields = [];
+					}
 
 					$vs_item_pk = $t_item->primaryKey();
 					$vs_label_table_name = $t_label->tableName();
 					$vs_label_pk = $t_label->primaryKey();
 					$vs_label_display_field = $t_item->getLabelDisplayField();
+					$va_label_ui_fields = $t_item->getLabelUIFields(); 
 					$vs_label_sort_field = $t_item->getLabelSortField();
+					
+					if(is_array($va_label_ui_fields) && sizeof($va_label_ui_fields)) {
+					    $va_label_ui_fields = array_map(function($v) { return "l.{$v}"; }, $va_label_ui_fields);
+					}
 
 					$vs_where_sql = $vs_join_sql = '';
 					$vb_needs_join = false;
@@ -2787,13 +3075,14 @@
 
 						return ((int)$qr_res->numRows() > 0) ? true : false;
 					} else {
-						$vs_parent_fld = $t_item->getProperty('HIERARCHY_PARENT_ID_FLD');
+						$vs_parent_fld_select = (($vs_parent_fld = $t_item->getProperty('HIERARCHY_PARENT_ID_FLD')) ? ", ".$vs_browse_table_name.".".$vs_parent_fld : '');
 						$vs_sql = "
-							SELECT  l.* ".(($vs_parent_fld) ? ", ".$vs_browse_table_name.".".$vs_parent_fld : '')."
+							SELECT COUNT(*) as _count, l.locale_id, l.{$vs_label_display_field} {$vs_parent_fld_select}, l.{$vs_item_pk}".((sizeof($va_label_ui_fields) > 0) ? ", ".join(", ", $va_label_ui_fields) : "")."
 							FROM {$vs_label_table_name} l
 								{$vs_join_sql}
 								{$vs_where_sql}
-							ORDER BY l.{$vs_label_display_field}
+							GROUP BY l.{$vs_label_display_field} {$vs_parent_fld_select}, l.locale_id, l.{$vs_item_pk}".((sizeof($va_label_order_by_fields) > 0) ? ", ".join(", ", $va_label_order_by_fields) : "")."
+							ORDER BY ".((sizeof($va_label_order_by_fields) > 0) ? join(", ", $va_label_order_by_fields) : "l.{$vs_label_display_field}")."
 						";
 
 						$qr_res = $this->opo_db->query($vs_sql);
@@ -2803,31 +3092,42 @@
 						$vn_parent_id = null;
 
 						$va_unique_values = array();
+						$vn_id = 0;
+						
+						$vs_label_template = caGetOption('template', $va_facet_info, null);
 						while($qr_res->nextRow()) {
-							$vn_id = $qr_res->get($t_item->primaryKey());
+							$vn_id++;
 
 							if ($vs_parent_fld) {
 								$vn_parent_id = $qr_res->get($vs_parent_fld);
 								if ($vn_parent_id) { $va_child_counts[$vn_parent_id]++; }
 							}
 
-							$vs_label = trim($qr_res->get($vs_label_display_field));
+                            if ($vs_label_template) {
+                                $vs_label = caProcessTemplate($vs_label_template, $qr_res->getRow());
+                            } else {
+							    $vs_label = trim($qr_res->get($vs_label_display_field));
+							}
 							$vs_sort_label = trim($qr_res->get($vs_label_sort_field));
 							
-							if (isset($va_unique_values[$vs_label])) { continue; }
+							//if (isset($va_unique_values[$vs_label])) { continue; }
 							$va_unique_values[$vs_label] = true;
-
-							$va_values[$vn_id][$qr_res->get('locale_id')] = array_merge($qr_res->getRow(), array(
-								'id' => $vn_id,
-								'parent_id' => $vn_parent_id,
-								'label' => $vs_sort_label ? $vs_sort_label : $vs_label,
-								'display_label' => $vs_label
-							));
+                            $vs_label_key = strtolower($vs_label);
+                            if (!isset($va_values[$vs_label_key][$qr_res->get('locale_id')])) {
+                                $va_values[$vs_label_key][$qr_res->get('locale_id')] = array_merge($qr_res->getRow(), array(
+                                    'id' => $qr_res->get($vs_item_pk),
+                                    'parent_id' => $vn_parent_id,
+                                    'label' => $vs_label,
+                                    'sort_label' =>  mb_strtolower($vs_sort_label ? $vs_sort_label :  $vs_label),
+                                    'content_count' => $qr_res->get('_count')
+                                ));
+                            } else {
+                                $va_values[$vs_label_key][$qr_res->get('locale_id')]['content_count'] += (int)$qr_res->get('_count');
+                            }
 							if (!is_null($vs_single_value) && ($vn_id == $vs_single_value)) {
 								$vb_single_value_is_present = true;
 							}
 						}
-
 
 						if ($vs_parent_fld) {
 							foreach($va_values as $vn_id => $va_values_by_locale) {
@@ -2842,23 +3142,26 @@
 						}
 
 						$va_values = caExtractValuesByUserLocale($va_values);
-						return $va_values;
+						return array_values($va_values);
 					}
 					break;
 				# -----------------------------------------------------
 				case 'attribute':
 					$t_item = $this->opo_datamodel->getInstanceByTableName($vs_browse_table_name, true);
 					$t_element = new ca_metadata_elements();
-					if (!$t_element->load(array('element_code' => $va_facet_info['element_code']))) {
+					$va_element_code = explode(".", $va_facet_info['element_code']);
+					
+					if (!$t_element->load(array('element_code' => array_pop($va_element_code)))) {
 						return array();
 					}
+					$vs_container_code = (sizeof($va_element_code) > 0) ? array_pop($va_element_code) : null;
 
 					$vn_element_type = $t_element->get('datatype');
 					$vn_element_id = $t_element->getPrimaryKey();
 
 					$va_joins = array(
 						'INNER JOIN ca_attribute_values ON ca_attributes.attribute_id = ca_attribute_values.attribute_id',
-						'INNER JOIN '.$vs_browse_table_name.' ON '.$vs_browse_table_name.'.'.$t_item->primaryKey().' = ca_attributes.row_id AND ca_attributes.table_num = '.intval($vs_browse_table_num)
+						'INNER JOIN '.(!$vb_is_relative_to_parent ? "{$vs_browse_table_name} ON {$vs_browse_table_name}." : "{$vs_browse_table_name} AS parent ON parent.").$t_item->primaryKey().' = ca_attributes.row_id AND ca_attributes.table_num = '.intval($vs_browse_table_num)
 					);
 
 					$va_wheres = array();
@@ -2935,14 +3238,22 @@
 
 						return ((int)$qr_res->numRows() > 1) ? true : false;
 					} else {
+					    $vs_container_sql = '';
+					    $va_params = [$vn_element_id];
+					    if (is_array($va_container_ids[$vs_container_code]) && sizeof($va_container_ids[$vs_container_code])) {
+					        $vs_container_sql = " AND ca_attributes.attribute_id IN (?)";
+					        $va_params[] = $va_container_ids[$vs_container_code];
+					    }
 						$vs_sql = "
-							SELECT DISTINCT value_longtext1, value_decimal1, value_longtext2, value_integer1
+							SELECT COUNT(*) as _count, ca_attribute_values.value_longtext1, ca_attribute_values.value_decimal1, ca_attribute_values.value_longtext2, ca_attribute_values.value_integer1, ca_attributes.attribute_id
 							FROM ca_attributes
 
 							{$vs_join_sql}
 							WHERE
-								ca_attribute_values.element_id = ? {$vs_where_sql}";
-						$qr_res = $this->opo_db->query($vs_sql, $vn_element_id);
+								ca_attribute_values.element_id = ? {$vs_where_sql} {$vs_container_sql}
+						    GROUP BY value_longtext1, value_decimal1, value_longtext2, value_integer1, ca_attributes.attribute_id
+						";
+						$qr_res = $this->opo_db->query($vs_sql, $va_params);
 
 						$va_values = array();
 
@@ -2959,13 +3270,17 @@
 							$va_suppress_values = caGetOption('exclude_values', $va_facet_info, null);
 						}
 
+						
 						switch($vn_element_type) {
 							case __CA_ATTRIBUTE_VALUE_LIST__:
+								if(!is_array($va_restrict_to_types = $this->_convertTypeCodesToIDs($va_facet_info['restrict_to_types'], array('instance' => new ca_list_items(), 'dontExpandHierarchically' => true)))) { $va_restrict_to_types = array(); }
+
 								$va_values = $qr_res->getAllFieldValues('value_longtext1');
+								$va_value_counts = $qr_res->getAllFieldValues('_count');
 								$qr_res->seek(0);
 
 								$t_list_item = new ca_list_items();
-								$va_list_item_cache = $t_list_item->getFieldValuesForIDs($va_values, array('idno', 'item_value', 'parent_id', 'access'));
+								$va_list_item_cache = $t_list_item->getFieldValuesForIDs($va_values, array('type_id', 'idno', 'item_value', 'parent_id', 'access', 'deleted'));
 								$va_list_child_count_cache = array();
 								if (is_array($va_list_item_cache)) {
 									foreach($va_list_item_cache as $vn_id => $va_item) {
@@ -2979,20 +3294,31 @@
 								// Translate value idnos to ids
 								if (is_array($va_suppress_values)) { $va_suppress_values = ca_lists::getItemIDsFromList($t_element->get('list_id'), $va_suppress_values); }
 
-								$va_facet_list = array();
-								foreach($va_values as $vn_val) {
+								$va_facet_list = [];
+								$va_children_by_parent_id = [];
+								foreach($va_values as $i => $vn_val) {
 									if (!$vn_val) { continue; }
+									if ($va_list_item_cache[$vn_val]['deleted'] > 0) { continue; }
 									if (is_array($va_suppress_values) && (in_array($vn_val, $va_suppress_values))) { continue; }
 									if (is_array($pa_options['checkAccess']) && sizeof($pa_options['checkAccess']) && !in_array($va_list_item_cache[$vn_val]['access'], $pa_options['checkAccess'])) { continue; }
 
+									if (sizeof($va_restrict_to_types) && !in_array($va_list_item_cache[$vn_val]['type_id'], $va_restrict_to_types)) { continue; } 
+									
 									if ($va_criteria[$vn_val]) { continue; }		// skip items that are used as browse critera - don't want to browse on something you're already browsing on
 									$vn_child_count = isset($va_list_child_count_cache[$vn_val]) ? $va_list_child_count_cache[$vn_val] : 0;
+									
+									if (!($vs_label = html_entity_decode($va_list_label_cache[$vn_val]))) { $vs_label = '['._t('BLANK').']'; }
+									if (is_array($va_facet_info['relabel']) && isset($va_facet_info['relabel'][$vs_label])) {
+									    $vs_label = $va_facet_info['relabel'][$vs_label];
+									}
 									$va_facet_list[$vn_val] = array(
 										'id' => $vn_val,
-										'label' => ($vs_label = html_entity_decode($va_list_label_cache[$vn_val])) ? $vs_label : _t('[BLANK]'),
-										'parent_id' => isset($va_list_item_cache[$vn_val]['parent_id']) ? $va_list_item_cache[$vn_val]['parent_id'] : null,
-										'child_count' => $vn_child_count
+										'label' => $vs_label,
+										'parent_id' => $vn_parent_id = isset($va_list_item_cache[$vn_val]['parent_id']) ? $va_list_item_cache[$vn_val]['parent_id'] : null,
+										'child_count' => $vn_child_count,
+										'content_count' => $va_value_counts[$i]
 									);
+									$va_children_by_parent_id[$vn_parent_id][] = $vn_val;
 								}
 								
 								if (!isset($va_facet_info['dont_expand_hierarchically']) || !$va_facet_info['dont_expand_hierarchically']) {
@@ -3007,19 +3333,51 @@
 									$vb_check_ancestor_access = (bool)(isset($pa_options['checkAccess']) && is_array($pa_options['checkAccess']) && sizeof($pa_options['checkAccess']) && $t_rel_item->hasField('access'));
 
 									if($qr_ancestors) {
+									    $va_parent_counts = [];
 										while($qr_ancestors->nextHit()) {
+											if ($qr_ancestors->get('deleted')) { continue; }
+											$vn_ancestor_id = (int)$qr_ancestors->get("{$vs_rel_pk}");
+											
 											$vn_parent_type_id = $qr_ancestors->get('type_id');
+											if (is_array($va_suppress_values) && (in_array($vn_ancestor_id, $va_suppress_values))) { continue; }
 											if ((sizeof($va_exclude_types) > 0) && in_array($vn_parent_type_id, $va_exclude_types)) { continue; }
 											if ((sizeof($va_restrict_to_types) > 0) && !in_array($vn_parent_type_id, $va_restrict_to_types)) { continue; }
 											if ($vb_check_ancestor_access && !in_array($qr_ancestors->get('access'), $pa_options['checkAccess'])) { continue; }
 											if (!($vn_parent_id = $qr_ancestors->get("parent_id"))) { continue; }
 											
-											$va_facet_list[$vn_ancestor_id = (int)$qr_ancestors->get("{$vs_rel_pk}")] = array(
+
+                                            if ((!isset($va_facet_info['dont_expand_hierarchically']) || !$va_facet_info['dont_expand_hierarchically']) && $t_rel_item->isHierarchical()) {
+                                                $vs_hier_left_fld = $t_rel_item->getProperty('HIERARCHY_LEFT_INDEX_FLD');
+                                                $vs_hier_right_fld = $t_rel_item->getProperty('HIERARCHY_RIGHT_INDEX_FLD');
+
+                                                $vs_get_item_sql = "{$vs_rel_table}.{$vs_hier_left_fld} >= ".$qr_ancestors->get($vs_hier_left_fld). " AND {$vs_rel_table}.{$vs_hier_right_fld} <= ".$qr_ancestors->get($vs_hier_right_fld);
+                                                if ($vn_hier_id_fld = $t_rel_item->getProperty('HIERARCHY_ID_FLD')) {
+                                                    $vs_get_item_sql .= " AND {$vs_rel_table}.{$vn_hier_id_fld} = ".(int)$qr_ancestors->get($vn_hier_id_fld);
+                                                }
+                                                $vs_get_item_sql = "({$vs_get_item_sql})";
+                                            } else {
+                                                $vs_get_item_sql = "({$vs_rel_table}.{$vs_rel_pk} = {$vn_ancestor_id})";
+                                            }
+                                            
+                                            $vs_sql = "
+                                                SELECT COUNT(DISTINCT ca_attributes.row_id, ca_attributes.table_num) as _count
+                                                FROM ca_attributes
+
+                                                {$vs_join_sql}
+                                                INNER JOIN ca_list_items ON ca_list_items.item_id = ca_attribute_values.item_id
+                                                WHERE
+                                                    ca_attribute_values.element_id = ? {$vs_where_sql} AND {$vs_get_item_sql}	
+                                            ";
+                                            $q_hier_count = $this->opo_db->query($vs_sql, $vn_element_id);
+										    $q_hier_count->nextRow();
+										
+											$va_facet_list[$vn_ancestor_id] = array(
 												'id' => $vn_ancestor_id,
-												'label' => ($vs_label = $qr_ancestors->get('ca_list_items.preferred_labels.name_plural')) ? $vs_label : _t('[BLANK]'),
+												'label' => ($vs_label = $qr_ancestors->get('ca_list_items.preferred_labels.name_plural')) ? $vs_label : '['._t('BLANK').']',
 												'parent_id' => $vn_parent_id,
 												'hierarchy_id' => $qr_ancestors->get('list_id'),
-												'child_count' => 1
+												'child_count' => 1,
+										        'content_count' => (int)$q_hier_count->get('_count')
 											);
 										}
 									}
@@ -3067,7 +3425,8 @@
 										'id' => str_replace('/', '&#47;', $vs_val),
 										'label' => html_entity_decode($va_list_items[$vs_val]['name_plural'] ? $va_list_items[$vs_val]['name_plural'] : $va_list_items[$vs_val]['item_value']),
 										'parent_id' => $va_list_items[$vs_val]['parent_id'],
-										'child_count' => $vn_child_count
+										'child_count' => $vn_child_count,
+										'content_count' => $qr_res->get('_count')
 									);
 									break;
 								case __CA_ATTRIBUTE_VALUE_OBJECTS__:
@@ -3082,25 +3441,29 @@
 									$vn_id = $qr_res->get('value_integer1');
 									$va_values[$vs_val] = array(
 										'id' => $vn_id,
-										'label' => html_entity_decode($va_auth_items[$vn_id] ? $va_auth_items[$vn_id] : $vs_val)
+										'label' => html_entity_decode($va_auth_items[$vn_id] ? $va_auth_items[$vn_id] : $vs_val),
+										'content_count' => $qr_res->get('_count')
 									);
 									break;
 								case __CA_ATTRIBUTE_VALUE_LCSH__:
 									$va_values[$vs_val] = array(
 										'id' => str_replace('/', '&#47;', $vs_val),
-										'label' => preg_replace('![ ]*\[[^\]]*\]!', '', $vs_val)
+										'label' => preg_replace('![ ]*\[[^\]]*\]!', '', $vs_val),
+										'content_count' => $qr_res->get('_count')
 									);
 									break;
 								case __CA_ATTRIBUTE_VALUE_CURRENCY__:
 									$va_values[sprintf("%014.2f", preg_replace("![\D]+!", "", $vs_val))] = array(
 										'id' => str_replace('/', '&#47;', $vs_val),
-										'label' => $vs_val
+										'label' => $vs_val,
+										'content_count' => $qr_res->get('_count')
 									);
 									break;
 								default:
 									$va_values[$vs_val] = array(
 										'id' => str_replace('/', '&#47;', $vs_val),
-										'label' => $vs_val
+										'label' => $vs_val,
+										'content_count' => $qr_res->get('_count')
 									);
 									break;
 							}
@@ -3195,11 +3558,13 @@
 
 						$vs_pk = $t_item->primaryKey();
 						$vs_sql = "
-							SELECT DISTINCT {$vs_browse_table_name}.current_loc_class, {$vs_browse_table_name}.current_loc_subclass, {$vs_browse_table_name}.current_loc_id
+							SELECT COUNT(*) _count, {$vs_browse_table_name}.current_loc_class, {$vs_browse_table_name}.current_loc_subclass, {$vs_browse_table_name}.current_loc_id
 							FROM {$vs_browse_table_name}
 							{$vs_join_sql}
 							WHERE
-								{$vs_where_sql}";
+								{$vs_where_sql}
+							GROUP BY {$vs_browse_table_name}.current_loc_class, {$vs_browse_table_name}.current_loc_subclass, {$vs_browse_table_name}.current_loc_id	
+							";
 						if($vs_sort_field) {
 							$vs_sql .= " ORDER BY {$vs_sort_field}";
 						}
@@ -3222,39 +3587,61 @@
 						foreach($va_values_by_table as $vs_loc_class => $va_loc_id_by_subclass) {
 							foreach($va_loc_id_by_subclass as $vs_loc_subclass => $va_loc_ids) {
 								if(sizeof($va_tmp = array_keys($va_loc_ids))) {
-									$vs_loc_table_name = $this->opo_datamodel->getTableName($vs_loc_class);
-									if (($vs_table_name = $vs_loc_table_name) == 'ca_objects_x_storage_locations') {
-										$vs_table_name = 'ca_storage_locations';
-									}
+									$vs_table_name = $vs_loc_table_name = $this->opo_datamodel->getTableName($vs_loc_class);
+									$vs_hier_table_name = (($vs_loc_table_name) == 'ca_objects_x_storage_locations') ? 'ca_storage_locations' : $vs_loc_table_name;
 
-									$qr_res = caMakeSearchResult($vs_table_name, $va_tmp);
+									$qr_res = caMakeSearchResult($vs_hier_table_name, $va_tmp);
 
-
-									if (isset($va_collapse_map[$vs_table_name]) && isset($va_collapse_map[$vs_table_name]['*']) && $va_collapse_map[$vs_table_name]['*']) {
+									if (isset($va_collapse_map[$vs_hier_table_name]) && isset($va_collapse_map[$vs_hier_table_name]['*']) && $va_collapse_map[$vs_hier_table_name]['*']) {
 										$va_values[$vs_id = "{$vs_loc_class}"] = array(
 											'id' => $vs_id,
-											'label' => $va_collapse_map[$vs_table_name]['*']
+											'label' => $va_collapse_map[$vs_hier_table_name]['*']
 										);
 										continue;
 									}
+									
+									$va_config = ca_objects::getConfigurationForCurrentLocationType($vs_table_name, $vs_loc_subclass, array('facet' => isset($va_facet_info['display']) ? $va_facet_info['display'] : null));
 
+									if ($vs_hier_table_name == 'ca_storage_locations') {
+										
+										if (!($vn_max_browse_depth = caGetOption('maximumBrowseDepth', $va_facet_info, null))) {
+											$vn_max_browse_depth = caGetOption('maximumBrowseDepth', $va_config, null);
+										}
+										if (!$vn_max_browse_depth) { $vn_max_browse_depth = null; } else { $vn_max_browse_depth++; }	// add one to account for invisible root
+										
+										$vs_hier_pk = $this->opo_datamodel->getTablePrimaryKeyName($vs_hier_table_name, true);
+									
+										$va_hier_ids = [];
+										while($qr_res->nextHit()) {
+											if (is_array($va_ids = $qr_res->get("{$vs_hier_table_name}.hierarchy.{$vs_hier_pk}", ['returnAsArray' => true, 'maxLevelsFromBottom' => $vn_max_browse_depth]))) {
+												foreach($va_ids as $vn_id) {
+													$va_hier_ids[$vn_id] = true;
+												}
+											}
+										}	
+										$va_hier_ids = array_keys($va_hier_ids);
+										$qr_res = caMakeSearchResult($vs_hier_table_name, $va_hier_ids);
+									}
+									
 									while($qr_res->nextHit()) {
 										$vn_id = $qr_res->getPrimaryKey();
-
-										$va_config = ca_objects::getConfigurationForCurrentLocationType($vs_table_name, $vs_loc_subclass, array('facet' => isset($va_facet_info['display']) ? $va_facet_info['display'] : null));
 
 										$vs_template = isset($va_config['template']) ? $va_config['template'] : "^{$vs_table_name}.preferred_labels";
 
 										if (isset($va_collapse_map[$vs_table_name]) && isset($va_collapse_map[$vs_table_name][$vs_loc_subclass]) && $va_collapse_map[$vs_table_name][$vs_loc_subclass]) {
+											if (!($vs_label = $va_collapse_map[$vs_table_name][$vs_loc_subclass])) { continue; }
 											$va_values[$vs_id = "{$vs_loc_class}:{$vs_loc_subclass}"] = array(
 												'id' => $vs_id,
-												'label' => $va_collapse_map[$vs_table_name][$vs_loc_subclass]
+												'label' => $vs_label
 											);
 											continue;
 										}
+										
+										if (!$vn_id || !($vs_label = $qr_res->getWithTemplate($vs_template, $va_config))) { continue; }
 										$va_values[$vs_id = "{$vs_loc_class}:{$vs_loc_subclass}:{$vn_id}"] = array(
 											'id' => $vs_id,
-											'label' => $qr_res->getWithTemplate($vs_template, $va_config)
+											'label' => $vs_label,
+											'content_count' => $qr_res->get('_count')
 										);
 									}
 								}
@@ -3354,6 +3741,9 @@
 							$qr_res = $this->opo_db->query($vs_sql, $vs_list_name);
 							return ((int)$qr_res->numRows() > 1) ? true : false;
 						} else {
+							// Get label ordering fields
+							$va_ordering_fields_to_fetch = (isset($va_facet_info['order_by_label_fields']) && is_array($va_facet_info['order_by_label_fields'])) ? $va_facet_info['order_by_label_fields'] : array();
+
 							$va_orderbys = array();
 							
 							// Get label ordering fields
@@ -3382,37 +3772,80 @@
 										break;
 								}
 							}
-							
+
 							$vs_order_by = (sizeof($va_orderbys) ? "ORDER BY ".join(', ', $va_orderbys) : '');
-							
 							$vs_sql = "
-								SELECT DISTINCT lil.item_id, lil.name_singular, lil.name_plural, lil.locale_id
+								SELECT COUNT(*) _count, lil.item_id, lil.name_singular, lil.name_plural, lil.name_sort, lil.locale_id, li.rank, li.idno_sort, li.parent_id
 								FROM ca_list_items li
 								INNER JOIN ca_list_item_labels AS lil ON lil.item_id = li.item_id
 								{$vs_join_sql}
 								WHERE
-									ca_lists.list_code = ?  AND lil.is_preferred = 1 {$vs_where_sql} {$vs_order_by}";
+									ca_lists.list_code = ?  AND lil.is_preferred = 1 {$vs_where_sql}
+								GROUP BY lil.item_id, lil.name_singular, lil.name_plural, lil.name_sort, lil.locale_id, li.rank, li.idno_sort 
+								{$vs_order_by}
+								";
 							//print $vs_sql." [$vs_list_name]";
 							$qr_res = $this->opo_db->query($vs_sql, $vs_list_name);
 
-							$va_values = array();
+							$va_values = [];
+							$vn_root_id = $t_list->getRootItemIDForList();
 							while($qr_res->nextRow()) {
+							    $vn_parent_id = $qr_res->get('parent_id');
 								$vn_id = $qr_res->get('item_id');
 								if ($va_criteria[$vn_id]) { continue; }		// skip items that are used as browse critera - don't want to browse on something you're already browsing on
 
 								$va_values[$vn_id][$qr_res->get('locale_id')] = array(
 									'id' => $vn_id,
-									'label' => $qr_res->get('name_plural')
+									'label' => $qr_res->get('name_plural'),
+									'content_count' => $qr_res->get('_count'),
+									'parent_id' => $vn_parent_id,
+									'child_count' => 0
 								);
 								if (!is_null($vs_single_value) && ($vn_id == $vs_single_value)) {
 									$vb_single_value_is_present = true;
 								}
 							}
+							
+							$va_values = caExtractValuesByUserLocale($va_values);
+							if ($va_facet_info['group_mode'] == 'hierarchical') {
+                                $t_rel_item = new ca_list_items();
+                                $qr_ancestors = call_user_func($t_rel_item->tableName().'::getHierarchyAncestorsForIDs', array_keys($va_values), array('returnAs' => 'SearchResult'));
+
+                                $vs_rel_table = $t_rel_item->tableName();
+                                $vs_rel_pk = $t_rel_item->primaryKey();
+
+                                $vb_check_ancestor_access = (bool)(isset($pa_options['checkAccess']) && is_array($pa_options['checkAccess']) && sizeof($pa_options['checkAccess']) && $t_rel_item->hasField('access'));
+
+                                if($qr_ancestors) {
+                                    while($qr_ancestors->nextHit()) {
+                                        if ($qr_ancestors->get('deleted')) { continue; }
+                                        $vn_ancestor_id = (int)$qr_ancestors->get("{$vs_rel_pk}");
+                                        $vn_parent_type_id = $qr_ancestors->get('type_id');
+                                        if (is_array($va_suppress_values) && (in_array($vn_ancestor_id, $va_suppress_values))) { continue; }
+                                        if ((sizeof($va_exclude_types) > 0) && in_array($vn_parent_type_id, $va_exclude_types)) { continue; }
+                                        if ((sizeof($va_restrict_to_types) > 0) && !in_array($vn_parent_type_id, $va_restrict_to_types)) { continue; }
+                                        if ($vb_check_ancestor_access && !in_array($qr_ancestors->get('access'), $pa_options['checkAccess'])) { continue; }
+                                        $va_values[$vn_ancestor_id] = array(
+                                            'id' => $vn_ancestor_id,
+                                            'label' => ($vs_label = $qr_ancestors->get('ca_list_items.preferred_labels.name_plural')) ? $vs_label : '['._t('BLANK').']',
+                                            'parent_id' => $qr_ancestors->get('ca_list_items.parent_id'),
+                                            'child_count' => 1
+                                        );
+                                    }
+                                }
+                            }
+							
+							
+							foreach($va_values as $vn_id => $va_value) {
+                                if ($va_value['parent_id'] && isset($va_values[$va_value['parent_id']])) {
+                                    $va_values[$va_value['parent_id']]['child_count']++;
+                                }
+                            }
 
 							if (!is_null($vs_single_value) && !$vb_single_value_is_present) {
 								return array();
 							}
-							return caExtractValuesByUserLocale($va_values);
+							return $va_values;
 						}
 					} else {
 
@@ -3491,11 +3924,13 @@
 								return ((int)$qr_res->numRows() > 1) ? true : false;
 							} else {
 								$vs_sql = "
-									SELECT DISTINCT ".$vs_browse_table_name.'.'.$vs_field_name."
+									SELECT COUNT(*) _count, ".$vs_browse_table_name.'.'.$vs_field_name."
 									FROM ".$vs_browse_table_name."
 									{$vs_join_sql}
 									".($vs_where_sql ? 'WHERE' : '')."
-										{$vs_where_sql}";
+										{$vs_where_sql}
+									GROUP BY {$vs_browse_table_name}.{$vs_field_name}
+								";
 								//print $vs_sql." [$vs_list_name]";
 
 								$qr_res = $this->opo_db->query($vs_sql);
@@ -3507,7 +3942,8 @@
 									if (isset($va_list_items_by_value[$vn_id])) {
 										$va_values[$vn_id] = array(
 											'id' => $vn_id,
-											'label' => $va_list_items_by_value[$vn_id]
+											'label' => $va_list_items_by_value[$vn_id],
+											'content_count' => $qr_res->get('_count')
 										);
 										if (!is_null($vs_single_value) && ($vn_id == $vs_single_value)) {
 											$vb_single_value_is_present = true;
@@ -3597,11 +4033,13 @@
 									return ((int)$qr_res->numRows() > 0) ? true : false;
 								} else {
 									$vs_sql = "
-										SELECT DISTINCT *
+										SELECT COUNT(*) _count,  *
 										FROM {$vs_facet_table}
 
 										{$vs_join_sql}
-										{$vs_where_sql}";
+										{$vs_where_sql}
+									    GROUP BY {$vs_facet_table}.{$vs_display_field_name}
+									";
 									//print $vs_sql;
 									$qr_res = $this->opo_db->query($vs_sql);
 
@@ -3613,7 +4051,8 @@
 
 										$va_values[$vn_id][$qr_res->get('locale_id')] = array(
 											'id' => $vn_id,
-											'label' => $qr_res->get($vs_display_field_name)
+											'label' => $qr_res->get($vs_display_field_name),
+									        'content_count' => $qr_res->get('_count')
 										);
 										if (!is_null($vs_single_value) && ($vn_id == $vs_single_value)) {
 											$vb_single_value_is_present = true;
@@ -3746,11 +4185,13 @@
 
 						$vs_pk = $t_item->primaryKey();
 						$vs_sql = "
-							SELECT DISTINCT {$vs_browse_table_name}.{$vs_field_name}
+							SELECT COUNT(*) _count, {$vs_browse_table_name}.{$vs_field_name}
 							FROM {$vs_browse_table_name}
 							{$vs_join_sql}
 							WHERE
-								{$vs_where_sql}";
+								{$vs_where_sql}
+						    GROUP BY {$vs_browse_table_name}.{$vs_field_name}
+						";
 						if($vs_sort_field) {
 							$vs_sql .= " ORDER BY {$vs_sort_field}";
 						}
@@ -3766,7 +4207,8 @@
 							} else {
 								$va_values[$vs_val] = array(
 									'id' => str_replace('/', '&#47;', $vs_val),
-									'label' => $vs_val
+									'label' => $vs_val,
+									'content_count' => $qr_res->get('_count')
 								);
 							}
 							if (!is_null($vs_single_value) && ($vs_val == $vs_single_value)) {
@@ -3867,13 +4309,15 @@
 					} else {
 						$vs_pk = $t_item->primaryKey();
 						$vs_sql = "
-							SELECT DISTINCT ca_metadata_dictionary_rules.rule_id
+							SELECT COUNT(*) _count, ca_metadata_dictionary_rules.rule_id
 							FROM {$vs_browse_table_name}
 							INNER JOIN ca_metadata_dictionary_rule_violations ON ca_metadata_dictionary_rule_violations.row_id = {$vs_browse_table_name}.".$t_item->primaryKey()." AND ca_metadata_dictionary_rule_violations.table_num = {$vs_browse_table_num}
 							INNER JOIN ca_metadata_dictionary_rules ON ca_metadata_dictionary_rules.rule_id = ca_metadata_dictionary_rule_violations.rule_id
 							{$vs_join_sql}
 							WHERE
-								{$vs_where_sql}";
+								{$vs_where_sql}
+							GROUP BY ca_metadata_dictionary_rules.rule_id
+						";
 
 						$qr_res = $this->opo_db->query($vs_sql);
 
@@ -3890,7 +4334,8 @@
 								} else {
 									$va_values[$vs_code] = array(
 										'id' => $vs_code,
-										'label' => $vs_val
+										'label' => $vs_val,
+									    'content_count' => $qr_res->get('_count')
 									);
 								}
 								if (!is_null($vs_single_value) && ($vs_code == $vs_single_value)) {
@@ -4031,11 +4476,12 @@
 						switch($va_facet_info['mode']) {
 							case 'user':
 								$vs_sql = "
-									SELECT DISTINCT ca_object_checkouts.user_id, ca_users.fname, ca_users.lname, ca_users.email
+									SELECT COUNT(*) _count, ca_object_checkouts.user_id, ca_users.fname, ca_users.lname, ca_users.email
 									FROM ca_objects
 									{$vs_join_sql}
 									WHERE
-										{$vs_where_sql} ".(sizeof($va_results) ? " AND (".$t_subject->tableName().'.'.$t_subject->primaryKey()." IN (".join(',', $va_results)."))" : "");
+										{$vs_where_sql} ".((sizeof($va_results) ? " AND (".$t_subject->tableName().'.'.$t_subject->primaryKey()." IN (".join(',', $va_results)."))" : "")).
+									" GROUP BY ca_object_checkouts.user_id, ca_users.fname, ca_users.lname, ca_users.email";
 
 								$qr_res = $this->opo_db->query($vs_sql);
 
@@ -4049,7 +4495,8 @@
 									} else {
 										$va_values[$vn_user_id] = array(
 											'id' => $vn_user_id,
-											'label' => $vs_val
+											'label' => $vs_val,
+											'count' => $qr_res->get('_count')
 										);
 									}
 									if (!is_null($vs_single_value) && ($vn_user_id == $vs_single_value)) {
@@ -4100,7 +4547,8 @@
 									if (!$qr_res->get('c')) { continue; }
 									$va_values[$vs_status] = array(
 										'id' => $vs_status,
-										'label' => $vs_status_text
+										'label' => $vs_status_text,
+										'count' => $qr_res->get('c')
 									);
 
 									if (!is_null($vs_single_value) && ($vs_status == $vs_single_value)) {
@@ -4122,12 +4570,16 @@
 				# -----------------------------------------------------
 				case 'normalizedDates':
 					$t_item = $this->opo_datamodel->getInstanceByTableName($vs_browse_table_name, true);
+					
+					$va_element_code = explode(".", $va_facet_info['element_code']);
 					$t_element = new ca_metadata_elements();
 
 					$vb_is_element = $vb_is_field = false;
-					if (!($vb_is_element = $t_element->load(array('element_code' => $va_facet_info['element_code']))) && !($vb_is_field = ($t_item->hasField($va_facet_info['element_code']) && ($t_item->getFieldInfo($va_facet_info['element_code'], 'FIELD_TYPE') === FT_HISTORIC_DATERANGE)))) {
+					if (!($vb_is_element = $t_element->load(array('element_code' => array_pop($va_element_code)))) && !($vb_is_field = ($t_item->hasField($va_facet_info['element_code']) && ($t_item->getFieldInfo($va_facet_info['element_code'], 'FIELD_TYPE') === FT_HISTORIC_DATERANGE)))) {
 						return array();
 					}
+					
+					$vs_container_code = (sizeof($va_element_code) > 0) ? array_pop($va_element_code) : null;
 
 					if ($vb_is_element) {
 						$va_joins = array(
@@ -4192,8 +4644,6 @@
 						$vs_where_sql = ' AND ('.$vs_where_sql.')';
 					}
 
-
-
 					$vs_join_sql = join("\n", $va_joins);
 
 					if ($vb_is_element) {
@@ -4202,6 +4652,33 @@
 						$vs_dir = (strtoupper($va_facet_info['sort']) === 'DESC') ? "DESC" : "ASC";
 
 						$o_tep = new TimeExpressionParser();
+						
+						// If a date criterion is already set then force current facet to only return values within the
+						// envelope set by the existing criterion.
+						if (is_array($va_current_criteria = $this->getCriteria())) {
+						    $vn_min = $vn_max = null;
+							foreach($va_current_criteria as $vs_criteria_facet => $va_criteria_values) {
+								if (is_array($va_criteria_facet_info = $this->getInfoForFacet($vs_criteria_facet))) {
+									if ($va_criteria_facet_info['type'] == 'normalizedDates') {
+										foreach(array_keys($va_criteria_values) as $vs_date) {
+											if ($o_tep->parse($vs_date)) {
+											    $va_ts = $o_tep->getHistoricTimestamps();
+											 
+											    if (is_null($vn_min) || ($va_ts['start'] < $vn_min)) {
+												    $va_facet_info['minimum_date'] = $o_tep->getText(['start_as_iso8601' => true]);
+												    $vn_min = $va_ts['start'];
+												}
+												if (is_null($vn_max) || ($va_ts['end'] > $vn_max)) {
+												    $va_facet_info['maximum_date'] = $o_tep->getText(['end_as_iso8601' => true]);
+												    $vn_max = $va_ts['end'];
+												}
+											}
+										}
+									}
+								}
+							}
+						}
+						
 						$vn_min_date = $vn_max_date = null;
 						$vs_min_sql = $vs_max_sql = '';
 						if (isset($va_facet_info['minimum_date'])) {
@@ -4235,8 +4712,14 @@
 
 							return ((int)$qr_res->numRows() > 0) ? true : false;
 						} else {
+						    $vs_container_sql = '';
+                            $va_params = [$vn_element_id];
+                            if (is_array($va_container_ids[$vs_container_code]) && sizeof($va_container_ids[$vs_container_code])) {
+                                $vs_container_sql = " AND ca_attributes.attribute_id IN (?)";
+                                $va_params[] = $va_container_ids[$vs_container_code];
+                            }
 							$vs_sql = "
-								SELECT DISTINCT ca_attribute_values.value_decimal1, ca_attribute_values.value_decimal2
+								SELECT COUNT(*) _count, ca_attribute_values.value_decimal1, ca_attribute_values.value_decimal2
 								FROM ca_attributes
 								{$vs_join_sql}
 								WHERE
@@ -4244,9 +4727,11 @@
 									{$vs_min_sql}
 									{$vs_max_sql}
 									{$vs_where_sql}
+									{$vs_container_sql}
+								GROUP BY ca_attribute_values.value_decimal1, ca_attribute_values.value_decimal2
 							";
 							//print $vs_sql;
-							$qr_res = $this->opo_db->query($vs_sql, $vn_element_id);
+							$qr_res = $this->opo_db->query($vs_sql, $va_params);
 
 							$vn_current_year = (int)date("Y");
 							$va_values = array();
@@ -4271,10 +4756,16 @@
 
 
 									if (is_numeric($vs_normalized_value) && (int)$vs_normalized_value === 0) { continue; }		// don't include year=0
-									$va_values[$vn_sort_value][$vs_normalized_value] = array(
-										'id' => $vs_normalized_value,
-										'label' => $vs_normalized_value
-									);
+									
+									if (!isset($va_values[$vn_sort_value][$vs_normalized_value])) {
+                                        $va_values[$vn_sort_value][$vs_normalized_value] = array(
+                                            'id' => $vs_normalized_value,
+                                            'label' => $vs_normalized_value,
+                                            'content_count' => (int)$qr_res->get('_count')
+                                        );
+                                    } else {
+                                         $va_values[$vn_sort_value][$vs_normalized_value]['content_count'] += $qr_res->get('_count');
+                                    }
 									if (!is_null($vs_single_value) && ($vs_normalized_value == $vs_single_value)) {
 										$vb_single_value_is_present = true;
 									}
@@ -4300,10 +4791,15 @@
 								}
 							}
 							if ($vb_unknown_is_set && (sizeof($va_values) > 0)) {
-								$va_values['999999999'][_t('Date unknown')] = array(
-									'id' => 'null',
-									'label' => _t('Date unknown')
-								);
+							    if(!isset($va_values['999999999'][_t('Date unknown')])) { 
+                                    $va_values['999999999'][_t('Date unknown')] = array(
+                                        'id' => 'null',
+                                        'label' => _t('Date unknown'),
+                                        'content_count' => $qr_res->numRows()
+                                    );
+                                } else {
+                                     $va_values['999999999'][_t('Date unknown')]['content_count'] += (int)$qr_res->numRows();
+                                }
 							}
 
 							if (!is_null($vs_single_value) && !$vb_single_value_is_present) {
@@ -4361,7 +4857,7 @@
 							return ((int)$qr_res->numRows() > 0) ? true : false;
 						} else {
 							$vs_sql = "
-								SELECT DISTINCT {$vs_browse_table_name}.{$vs_browse_start_fld}, {$vs_browse_table_name}.{$vs_browse_end_fld}
+								SELECT COUNT(*) _count, {$vs_browse_table_name}.{$vs_browse_start_fld}, {$vs_browse_table_name}.{$vs_browse_end_fld}
 								FROM {$vs_browse_table_name}
 								{$vs_join_sql}
 								WHERE
@@ -4369,6 +4865,7 @@
 									{$vs_min_sql}
 									{$vs_max_sql}
 									{$vs_where_sql}
+								GROUP BY {$vs_browse_table_name}.{$vs_browse_start_fld}, {$vs_browse_table_name}.{$vs_browse_end_fld}
 							";
 							//print $vs_sql;
 							$qr_res = $this->opo_db->query($vs_sql);
@@ -4384,10 +4881,15 @@
 									if ($va_criteria[$vs_normalized_value]) { continue; }		// skip items that are used as browse critera - don't want to browse on something you're already browsing on
 
 									if (is_numeric($vs_normalized_value) && (int)$vs_normalized_value === 0) { continue; }		// don't include year=0
-									$va_values[$vn_sort_value][$vs_normalized_value] = array(
-										'id' => $vs_normalized_value,
-										'label' => $vs_normalized_value
-									);
+									if(!isset($va_values[$vn_sort_value][$vs_normalized_value])) {
+                                        $va_values[$vn_sort_value][$vs_normalized_value] = array(
+                                            'id' => $vs_normalized_value,
+                                            'label' => $vs_normalized_value,
+                                            'content_count' => $qr_res->get('_count')
+                                        );
+                                    } else {
+                                        $va_values[$vn_sort_value][$vs_normalized_value]['content_count'] += (int)$qr_res->get('_count');
+                                    }
 									if (!is_null($vs_single_value) && ($vs_normalized_value == $vs_single_value)) {
 										$vb_single_value_is_present = true;
 									}
@@ -4412,12 +4914,16 @@
 				# -----------------------------------------------------
 				case 'normalizedLength':
 					$t_item = $this->opo_datamodel->getInstanceByTableName($vs_browse_table_name, true);
+					
+					$va_element_code = explode(".", $va_facet_info['element_code']);
 					$t_element = new ca_metadata_elements();
 
 					$vb_is_element = $vb_is_field = false;
-					if (!($vb_is_element = $t_element->load(array('element_code' => $va_facet_info['element_code']))) && !($vb_is_field = ($t_item->hasField($va_facet_info['element_code']) && ($t_item->getFieldInfo($va_facet_info['element_code'], 'FIELD_TYPE') === FT_HISTORIC_DATERANGE)))) {
+					if (!($vb_is_element = $t_element->load(array('element_code' => array_pop($va_element_code)))) && !($vb_is_field = ($t_item->hasField($va_facet_info['element_code']) && ($t_item->getFieldInfo($va_facet_info['element_code'], 'FIELD_TYPE') === FT_HISTORIC_DATERANGE)))) {
 						return array();
 					}
+					
+					$vs_container_code = (sizeof($va_element_code) > 0) ? array_pop($va_element_code) : null;
 
 					if ($vb_is_element) {
 						$va_joins = array(
@@ -4518,8 +5024,14 @@
 
 						return ((int)$qr_res->numRows() > 0) ? true : false;
 					} else {
+					    $vs_container_sql = '';
+                        $va_params = [$vn_element_id];
+                        if (is_array($va_container_ids[$vs_container_code]) && sizeof($va_container_ids[$vs_container_code])) {
+                            $vs_container_sql = " AND ca_attributes.attribute_id IN (?)";
+                            $va_params[] = $va_container_ids[$vs_container_code];
+                        }
 						$vs_sql = "
-							SELECT DISTINCT ca_attribute_values.value_decimal1, ca_attribute_values.value_decimal2, ca_attribute_values.value_longtext1, ca_attribute_values.value_longtext2
+							SELECT COUNT(*) _count, ca_attribute_values.value_decimal1, ca_attribute_values.value_decimal2, ca_attribute_values.value_longtext1, ca_attribute_values.value_longtext2, ca_attributes.attribute_id
 							FROM ca_attributes
 							{$vs_join_sql}
 							WHERE
@@ -4527,9 +5039,11 @@
 								{$vs_min_sql}
 								{$vs_max_sql}
 								{$vs_where_sql}
+								{$vs_container_sql}
+							GROUP BY ca_attribute_values.value_decimal1, ca_attribute_values.value_decimal2, ca_attribute_values.value_longtext1, ca_attribute_values.value_longtext2
 						";
 						//print $vs_sql;
-						$qr_res = $this->opo_db->query($vs_sql, $vn_element_id);
+						$qr_res = $this->opo_db->query($vs_sql, $va_params);
 
 						$va_values = array();
 
@@ -4556,7 +5070,8 @@
 							$vs_normalized_range_with_units = "{$vn_normalized} {$vs_units} - ".($vn_normalized + $vn_increment_in_current_units)." {$vs_units}";
 							$va_values[$vn_normalized][$vn_normalized] = array(
 								'id' => $vn_normalized,
-								'label' => $vs_normalized_range_with_units
+								'label' => $vs_normalized_range_with_units,
+								'content_count' => $qr_res->get('_count')
 							);
 							if (!is_null($vs_single_value) && ($vn_normalized == $vs_single_value)) {
 								$vb_single_value_is_present = true;
@@ -4593,6 +5108,8 @@
 							$va_restrict_to_types = array_intersect($va_restrict_to_types, $va_user_type_restrictions);
 						}
 					}
+					
+					$va_sql_params = [];
 
 					if (!is_array($va_exclude_types = $va_facet_info['exclude_types'])) { $va_exclude_types = array(); }
 					if (!is_array($va_restrict_to_relationship_types = $va_facet_info['restrict_to_relationship_types'])) { $va_restrict_to_relationship_types = array(); }
@@ -4637,10 +5154,8 @@
 					// look up relationship type restrictions
 					$va_restrict_to_relationship_types = $this->_getRelationshipTypeIDs($va_restrict_to_relationship_types, $va_facet_info['relationship_table']);
 					$va_exclude_relationship_types = $this->_getRelationshipTypeIDs($va_exclude_relationship_types, $va_facet_info['relationship_table']);
-					$va_joins = array();
-					$va_selects = array();
-					$va_wheres = array();
-					$va_orderbys = array();
+					
+					$va_joins = $va_selects = $va_select_flds =  $va_wheres = $va_orderbys = [];
 
 if (!$va_facet_info['show_all_when_first_facet'] || ($this->numCriteria() > 0)) {
 					$vs_cur_table = array_shift($va_path);
@@ -4697,6 +5212,24 @@ if (!$va_facet_info['show_all_when_first_facet'] || ($this->numCriteria() > 0)) 
 							$va_wheres[] = "(".$vs_browse_table_name.".access IN (".join(',', $pa_options['checkAccess'])."))";		// exclude non-accessible browse items
 						}
 					}
+					
+					if ($t_item_rel && isset($va_facet_info['filter_on_interstitial']) && is_array($va_facet_info['filter_on_interstitial']) && sizeof($va_facet_info['filter_on_interstitial'])) {
+						foreach($va_facet_info['filter_on_interstitial'] as $vs_field_name => $va_values) {
+							if (!$va_values) { continue; }
+							if (!is_array($va_values)) { $va_values = [$va_values]; }
+							
+							if (!($vn_element_id = (int)ca_metadata_elements::getElementID($vs_field_name))) { continue; }
+							if (!($o_value = Attribute::getValueInstance(ca_metadata_elements::getElementDatatype($vs_field_name)))) { continue; }
+							
+							$va_element_value = $o_value->parseValue($va_values[0], array_merge(ca_metadata_elements::getElementSettingsForId($vs_field_name), ['list_id' => ca_metadata_elements::getElementListID($vs_field_name)], ['matchOn' => ['idno']]));
+					
+							$va_joins[] = "INNER JOIN ca_attributes c_a ON c_a.row_id = ".$t_item_rel->primaryKey(true)." AND c_a.table_num = ".$t_item_rel->tableNum();
+							$va_joins[] = "INNER JOIN ca_attribute_values c_av ON c_a.attribute_id = c_av.attribute_id";
+							$va_wheres[] = "c_av.element_id = {$vn_element_id} AND ".(isset($va_element_value['item_id']) ? "c_av.item_id = ?" : "c_av.value_longtext1 = ?");
+						
+							$va_sql_params[] = (isset($va_element_value['item_id'])) ? (int)$va_element_value['item_id'] : $va_element_value['value_longtext1'];
+						}
+					}
 
 					if ($t_item->hasField('deleted') && !$va_facet_info['show_all_when_first_facet']) {
 						$va_wheres[] = "(".$t_item->tableName().".deleted = 0)";
@@ -4709,9 +5242,9 @@ if (!$va_facet_info['show_all_when_first_facet'] || ($this->numCriteria() > 0)) 
 					$va_rel_attr_elements = $t_rel_item->getApplicableElementCodes(null, true, false);
 
 					$va_attrs_to_fetch = array();
-if (!$va_facet_info['show_all_when_first_facet'] || ($this->numCriteria() > 0)) {
+//if (!$va_facet_info['show_all_when_first_facet'] || ($this->numCriteria() > 0)) {
 					//$va_selects[] = $t_item->tableName().'.'.$t_item->primaryKey();			// get primary key of subject
-}
+//}
 					$va_selects[] = $t_rel_item->tableName().'.'.$vs_rel_pk;				// get primary key of related
 
 
@@ -4724,6 +5257,8 @@ if (!$va_facet_info['show_all_when_first_facet'] || ($this->numCriteria() > 0)) 
 							$va_selects[] = $t_rel_item->tableName().'.'.$vs_hier_id_fld;
 						}
 					}
+					
+					$va_select_flds = $va_selects;
 
 					// analyze group_fields (if defined) and add them to the query
 					$va_groupings_to_fetch = array();
@@ -4732,12 +5267,14 @@ if (!$va_facet_info['show_all_when_first_facet'] || ($this->numCriteria() > 0)) 
 							// is grouping type_id?
 							if (($vs_grouping === 'type') && $t_rel_item->hasField('type_id')) {
 								$va_selects[] = $t_rel_item->tableName().'.type_id';
+								$va_select_flds[] = $t_rel_item->tableName().'.type_id';
 								$va_groupings_to_fetch[] = 'type_id';
 							}
 
 							// is group field a relationship type?
 							if ($vs_grouping === 'relationship_types') {
 								$va_selects[] = $va_facet_info['relationship_table'].'.type_id rel_type_id';
+								$va_select_flds[] = $va_facet_info['relationship_table'].'.type_id';
 								$va_groupings_to_fetch[] = 'rel_type_id';
 							}
 
@@ -4820,7 +5357,7 @@ if (!$va_facet_info['show_all_when_first_facet'] || ($this->numCriteria() > 0)) 
 	if (!$va_facet_info['show_all_when_first_facet'] || ($this->numCriteria() > 0)) {
 						$vs_sql = "
 							SELECT 1
-							FROM ".$vs_browse_table_name."
+							FROM {$vs_browse_table_name}
 							{$vs_join_sql}
 								".(sizeof($va_wheres) ? ' WHERE ' : '').join(" AND ", $va_wheres)." LIMIT 1";
 	} else {
@@ -4830,7 +5367,7 @@ if (!$va_facet_info['show_all_when_first_facet'] || ($this->numCriteria() > 0)) 
 							{$vs_join_sql}
 								".(sizeof($va_wheres) ? ' WHERE ' : '').join(" AND ", $va_wheres)." LIMIT 1";
 	}
-						$qr_res = $this->opo_db->query($vs_sql);
+						$qr_res = $this->opo_db->query($vs_sql, $va_sql_params);
 						//print "<hr>$vs_sql<hr>\n";
 
 						return ((int)$qr_res->numRows() > 0) ? true : false;
@@ -4838,22 +5375,22 @@ if (!$va_facet_info['show_all_when_first_facet'] || ($this->numCriteria() > 0)) 
 
 	if (!$va_facet_info['show_all_when_first_facet'] || ($this->numCriteria() > 0)) {
 						$vs_sql = "
-							SELECT DISTINCT ".join(', ', $va_selects)."
-							FROM ".$vs_browse_table_name."
+							SELECT COUNT(*) _count, ".join(', ', $va_selects)."
+							FROM {$vs_browse_table_name}
 							{$vs_join_sql}
 								".(sizeof($va_wheres) ? ' WHERE ' : '').join(" AND ", $va_wheres)."
 								".(sizeof($va_orderbys) ? "ORDER BY ".join(', ', $va_orderbys) : '');
 	} else {
 						$vs_sql = "
-							SELECT DISTINCT ".join(', ', $va_selects)."
+							SELECT COUNT(*) _count, ".join(', ', $va_selects)."
 							FROM ".$t_rel_item->tableName()."
 							{$vs_join_sql}
 								".(sizeof($va_wheres) ? ' WHERE ' : '').join(" AND ", $va_wheres)."
 								".(sizeof($va_orderbys) ? "ORDER BY ".join(', ', $va_orderbys) : '');
-	}
+	}                  
+	                    $vs_sql .= " GROUP BY ".join(', ', $va_select_flds);
 						//print "<hr>$vs_sql<hr>\n";
-
-						$qr_res = $this->opo_db->query($vs_sql);
+						$qr_res = $this->opo_db->query($vs_sql, $va_sql_params);
 
 						$va_facet = $va_facet_items = array();
 						$vs_rel_pk = $t_rel_item->primaryKey();
@@ -4891,7 +5428,8 @@ if (!$va_facet_info['show_all_when_first_facet'] || ($this->numCriteria() > 0)) 
 									'parent_id' => $vb_rel_is_hierarchical ? $va_fetched_row[$vs_hier_parent_id_fld] : null,
 									'hierarchy_id' => $vb_rel_is_hierarchical ? $va_fetched_row[$vs_hier_id_fld] : null,
 									'rel_type_id' => array(),
-									'child_count' => 0
+									'child_count' => 0,
+									'content_count' => $va_fetched_row['_count']
 								);
 
 								if (!is_null($vs_single_value) && ($va_fetched_row[$vs_rel_pk] == $vs_single_value)) {
@@ -4918,12 +5456,17 @@ if (!$va_facet_info['show_all_when_first_facet'] || ($this->numCriteria() > 0)) 
 
 						if($qr_ancestors) {
 							while($qr_ancestors->nextHit()) {
-								$vn_parent_type_id = $qr_ancestors->get('type_id');
+								if ($qr_ancestors->get("{$vs_rel_table}.deleted")) { continue; }
+								if (!($vn_parent_type_id = $qr_ancestors->get('type_id'))) { continue; }
+								
+								$vn_ancestor_id = (int)$qr_ancestors->get("{$vs_rel_pk}");
+								if (isset($va_criteria[$vn_ancestor_id])) { continue; }		// skip items that are used as browse critera - don't want to browse on something you're already browsing on
+
 								if ((sizeof($va_exclude_types) > 0) && in_array($vn_parent_type_id, $va_exclude_types)) { continue; }
 								if ((sizeof($va_restrict_to_types) > 0) && !in_array($vn_parent_type_id, $va_restrict_to_types)) { continue; }
 								if ($vb_check_ancestor_access && !in_array($qr_ancestors->get('access'), $pa_options['checkAccess'])) { continue; }
 
-								$va_facet_items[$vn_ancestor_id = (int)$qr_ancestors->get("{$vs_rel_pk}")] = array(
+								$va_facet_items[$vn_ancestor_id] = array(
 									'id' => $vn_ancestor_id,
 									'type_id' => array(),
 									'parent_id' => $vb_rel_is_hierarchical ? $qr_ancestors->get("{$vs_hier_parent_id_fld}") : null,
@@ -4969,14 +5512,18 @@ if (!$va_facet_info['show_all_when_first_facet'] || ($this->numCriteria() > 0)) 
 
 								$va_orderbys = array();
 								foreach($va_ordering_fields_to_fetch as $vs_sort_by_field) {
-									if (!$t_rel_item_label->hasField($vs_sort_by_field)) { continue; }
-									$va_orderbys[] = $va_label_selects[] = $vs_label_table_name.'.'.$vs_sort_by_field;
+									if ($t_rel_item_label->hasField($vs_sort_by_field)) { 
+										$va_orderbys[] = $va_label_selects[] = $vs_label_table_name.'.'.$vs_sort_by_field;
+									} elseif($t_rel_item->hasField($vs_sort_by_field)) {
+										$va_orderbys[] = $va_label_selects[] = $t_rel_item->tableName().'.'.$vs_sort_by_field;
+									}
 								}
 
 								// get labels
 								$vs_sql = "
 									SELECT ".join(', ', $va_label_selects)."
-									FROM ".$vs_label_table_name."
+									FROM {$vs_label_table_name}
+									INNER JOIN ".$t_rel_item->tableName()." ON ".$t_rel_item->tableName().".{$vs_rel_pk} = {$vs_label_table_name}.{$vs_rel_pk}
 										".(sizeof($va_label_wheres) ? ' WHERE ' : '').join(" AND ", $va_label_wheres)."
 										".(sizeof($va_orderbys) ? "ORDER BY ".join(', ', $va_orderbys) : '')."";
 								//print $vs_sql;
@@ -5528,7 +6075,26 @@ if (!$va_facet_info['show_all_when_first_facet'] || ($this->numCriteria() > 0)) 
 		/**
 		 *
 		 */
+		private function _isParentRelative($ps_relative_to_table) {
+			$va_relative_to_tmp = explode('.', $ps_relative_to_table);
+			return ($va_relative_to_tmp[1] == 'parent_id') ? $va_relative_to_tmp[0] : false;
+		}
+		# ------------------------------------------------------
+		/**
+		 *
+		 */
 		private function _getRelativeFacetSQLData($ps_relative_to_table, $pa_options) {
+
+			$va_joins = $va_wheres = array();
+			
+			if ($vs_relative_to_table = $this->_isParentRelative($ps_relative_to_table)) {
+				$ps_relative_to_table = $vs_relative_to_table;
+				
+				$va_joins[] = "INNER JOIN {$ps_relative_to_table} ON ".$this->ops_browse_table_name.".parent_id = parent.object_id";
+				$va_wheres = [];
+				
+				return array('joins' => $va_joins, 'wheres' => $va_wheres);
+			} 
 			switch(sizeof($va_path = array_keys($this->opo_datamodel->getPath($ps_relative_to_table, $this->ops_browse_table_name)))) {
 				case __CA_ATTRIBUTE_VALUE_LIST__:
 					$t_item_rel = $this->opo_datamodel->getInstanceByTableName($va_path[1], true);
@@ -5545,8 +6111,6 @@ if (!$va_facet_info['show_all_when_first_facet'] || ($this->numCriteria() > 0)) 
 					return null;
 					break;
 			}
-
-			$va_joins = $va_wheres = array();
 
 			$vs_cur_table = array_shift($va_path);
 			foreach($va_path as $vs_join_table) {
@@ -5565,6 +6129,25 @@ if (!$va_facet_info['show_all_when_first_facet'] || ($this->numCriteria() > 0)) 
 		 *
 		 */
 		private function _getRelativeExecuteSQLData($ps_relative_to_table, $pa_options=null) {
+			if ($vs_relative_to_table = $this->_isParentRelative($ps_relative_to_table)) {
+				$ps_relative_to_table = $vs_relative_to_table;
+				
+				$va_relative_joins[] = "INNER JOIN {$ps_relative_to_table} AS parent ON ".$this->ops_browse_table_name.".parent_id = parent.object_id";
+				$va_wheres = [];
+						
+				if (!($t_target = $this->opo_datamodel->getInstanceByTableName($vs_relative_to_table, true))) { return null; }
+				$vs_target_browse_table_num = $t_target->tableNum();
+				$vs_target_browse_table_pk = $t_target->primaryKey();
+				
+				return array(
+					'joins' => [], 'wheres' => $va_wheres, 'relative_joins' => $va_relative_joins,
+					'target_table_name' => $vs_relative_to_table,
+					'target_table_num' => $vs_target_browse_table_num,
+					'target_table_pk' => $vs_target_browse_table_pk
+				);
+			}
+		
+		
 			if (!($t_target = $this->opo_datamodel->getInstanceByTableName($ps_relative_to_table, true))) { return null; }
 			$vs_target_browse_table_num = $t_target->tableNum();
 			$vs_target_browse_table_pk = $t_target->primaryKey();

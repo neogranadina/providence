@@ -7,7 +7,7 @@
  * ----------------------------------------------------------------------
  *
  * Software by Whirl-i-Gig (http://www.whirl-i-gig.com)
- * Copyright 2015 Whirl-i-Gig
+ * Copyright 2015-2016 Whirl-i-Gig
  *
  * For more information visit http://www.CollectiveAccess.org
  *
@@ -83,6 +83,7 @@ class ExpressionVisitor implements Visitor\Visit {
 			'round'			=> xcallable('round'),
 			'random'		=> xcallable('rand'),
 			'current'		=> xcallable('caIsCurrentDate'),
+			'isvaliddate'	=> xcallable('caIsValidDate'),
 			'future'		=> xcallable('caDateEndsInFuture'),
 			'wc'			=> xcallable('str_word_count'),
 			'length'		=> xcallable('strlen'),
@@ -98,9 +99,10 @@ class ExpressionVisitor implements Visitor\Visit {
 			'average' 		=> xcallable($average),
 			'avg'     		=> xcallable($average),
 			'sum'			=> xcallable(function () { return array_sum(func_get_args()); }),
+			'replace'		=> xcallable('preg_replace'),
 			'join'			=> xcallable($implode),
 			'implode'		=> xcallable($implode),
-			'trim'			=> xcallable('trim'),
+			'trim'			=> xcallable('trim')
 		);
 		return;
 	}

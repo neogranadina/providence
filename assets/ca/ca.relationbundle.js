@@ -6,7 +6,7 @@
  * ----------------------------------------------------------------------
  *
  * Software by Whirl-i-Gig (http://www.whirl-i-gig.com)
- * Copyright 2009-2015 Whirl-i-Gig
+ * Copyright 2009-2018 Whirl-i-Gig
  *
  * For more information visit http://www.CollectiveAccess.org
  *
@@ -43,15 +43,15 @@ var caUI = caUI || {};
 		}
 	});
 	caUI.initRelationBundle = function(container, options) {
+		if (options.onAddItem) { options.onAddRelationshipItem = options.onAddItem; }
+		
 		options.onInitializeItem = function(id, values, options) { 
 			jQuery("#" + options.itemID + id + " select").css('display', 'inline');
 			var i, typeList, types = [], lists = [];
 			
 			var item_type_id = values['item_type_id'];
-			
 			// use type map to convert a child type id to the parent type id used in the restriction
 			if (options.relationshipTypes && options.relationshipTypes['_type_map'] && options.relationshipTypes['_type_map'][item_type_id]) { item_type_id = options.relationshipTypes['_type_map'][item_type_id]; }
-			
 			if (options.relationshipTypes && (typeList = options.relationshipTypes[item_type_id])) {
 				for(i=0; i < typeList.length; i++) {
 					types.push({type_id: typeList[i].type_id, typename: typeList[i].typename, direction: typeList[i].direction});
@@ -87,6 +87,18 @@ var caUI = caUI || {};
 					types.push({type_id: typeList[i].type_id, typename: typeList[i].typename, direction: typeList[i].direction});
 				}
 			}
+			
+			jQuery('#' + options.itemID + id + ' select#' + options.fieldNamePrefix + 'type_id' + id + ' option').remove();	// clear existing options
+			jQuery.each(types, function (i, t) {
+				var type_direction = (t.direction) ? t.direction+ "_" : '';
+				jQuery('#' + options.itemID + id + ' select#' + options.fieldNamePrefix + 'type_id' + id).append("<option value='" + type_direction + t.type_id + "'>" + t.typename + "</option>");
+			});
+			
+			// select default
+			jQuery('#' + options.itemID + id + ' select#' + options.fieldNamePrefix + 'type_id' + id + " option[value=\"" + values['relationship_type_id'] + "\"], #" + options.itemID + id + ' select#' + options.fieldNamePrefix + 'type_id' + id + " option[value=\"" + values['rel_type_id'] + "\"]").prop('selected', true);
+		
+			// set current type
+			jQuery('#' + options.itemID + id + ' select#' + options.fieldNamePrefix + 'type_id' + id).data('item_type_id', item_type_id);
 			
 			if (caUI && caUI.utils && caUI.utils.showUnsavedChangesWarning) {
 				// Attached change handler to form elements in relationship
@@ -163,6 +175,8 @@ var caUI = caUI || {};
 					}
 				}, options.autocompleteOptions)
 			).on('click', null, {}, function() { this.select(); });
+			
+			if (options.onAddRelationshipItem) { options.onAddRelationshipItem(id, options, isNew); }
 		};
 		
 		options.select = function(id, data) {
@@ -179,10 +193,11 @@ var caUI = caUI || {};
 			if (jQuery('#' + options.itemID + id + ' select[name=' + options.fieldNamePrefix + 'type_id' + id + ']').data('item_type_id') == type_id) {
 				// noop - don't change relationship types unless you have to
 			} else {
+				var types_output = {};
 				if (options.relationshipTypes && (typeList = options.relationshipTypes[type_id])) {
 					for(i=0; i < typeList.length; i++) {
 						types.push({type_id: typeList[i].type_id, typename: typeList[i].typename, direction: typeList[i].direction, rank: typeList[i].rank });
-						
+						types_output[typeList[i].type_id] = 1;
 						if (parseInt(typeList[i].is_default) === 1) {
 							default_type = (typeList[i].direction ? typeList[i].direction : '') + typeList[i].type_id;
 						}
@@ -191,6 +206,7 @@ var caUI = caUI || {};
 				// look for null (these are unrestricted and therefore always displayed)
 				if (options.relationshipTypes && (typeList = options.relationshipTypes['NULL'])) {
 					for(i=0; i < typeList.length; i++) {
+						if(types_output[typeList[i].type_id]) continue;
 						types.push({type_id: typeList[i].type_id, typename: typeList[i].typename, direction: typeList[i].direction, rank: typeList[i].rank });
 						
 						if (parseInt(typeList[i].is_default) === 1) {
@@ -223,34 +239,43 @@ var caUI = caUI || {};
 			that.showUnsavedChangesWarning(true);
 		};
 		
-		options.sort = function(key) {
+		options.sort = function(key, label) {
 			var indexedValues = {};
+
 			jQuery.each(jQuery(that.container + ' .bundleContainer .' + that.itemListClassName + ' .roundedRel'), function(k, v) {
 				var id_string = jQuery(v).attr('id');
 				if (id_string) {
-					var indexKey;
-					if(key == 'name') {
-						indexKey = jQuery('#' + id_string + ' .itemName').text() + "/" + id_string;
-					} else {
-						if (key == 'type') {
-							indexKey = jQuery('#' + id_string + ' .itemType').text() + "/" + id_string;
-						} else {
-							if (key == 'idno') {
-								indexKey = jQuery('#' + id_string + ' .itemIdno').text() + "/" + id_string;
-							} else {
-								indexKey = id_string;
-							}
-						}
-					}
-					indexedValues[indexKey] = v;
+					var matches = /_([\d]+)$/.exec(id_string);
+					indexedValues[parseInt(matches[1])] = v;
 				}
 				jQuery(v).detach();
 			});
-			indexedValues = caUI.utils.sortObj(indexedValues, true);
+
+			var sortUrl = that.sortUrl + '/sortKeys/' + key;
+			var sortedValues = {};
+			
+			var sortDirection = jQuery('#' + that.fieldNamePrefix + 'RelationBundleSortDirectionControl').val();
+			if (sortDirection.toLowerCase() !== 'desc') { sortDirection = 'asc'; }
+
+			// we actually have to wait for the result here ... hence, ajax() with async=false instead of getJSON()
+			jQuery.ajax({
+				url: sortUrl,
+				type: 'POST',
+				data: { 'ids': Object.keys(indexedValues).join(','), 'sortDirection': sortDirection },
+				dataType: 'json',
+				async: false,
+				success: function(data) {
+					for (var i = 0; i < data.length; i++) {
+						sortedValues[that.fieldNamePrefix + 'Item_' + data[i]] = indexedValues[parseInt(data[i])];
+					}
+				}
+			});
+
+			jQuery('#' + that.fieldNamePrefix + 'caCurrentSortLabel').html(label);
 			
 			var whatsLeft = jQuery(that.container + ' .bundleContainer .' + that.itemListClassName).html();
 			jQuery(that.container + ' .bundleContainer .' + that.itemListClassName).html('');
-			jQuery.each(indexedValues, function(k, v) {
+			jQuery.each(sortedValues, function(k, v) {
 				jQuery(that.container + ' .bundleContainer .' + that.itemListClassName).append(v);
 				var id_string = jQuery(v).attr('id');
 				that.setDeleteButton(id_string);
@@ -258,7 +283,6 @@ var caUI = caUI || {};
 			
 			jQuery(that.container + ' .bundleContainer .' + that.itemListClassName).append(whatsLeft);
 			
-			caUI.utils.showUnsavedChangesWarning(true);
 			that._updateSortOrderListIDFormElement();
 		};
 	

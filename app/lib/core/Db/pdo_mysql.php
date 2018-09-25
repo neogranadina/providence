@@ -7,7 +7,7 @@
  * ----------------------------------------------------------------------
  *
  * Software by Whirl-i-Gig (http://www.whirl-i-gig.com)
- * Copyright 2013-2015 Whirl-i-Gig
+ * Copyright 2013-2017 Whirl-i-Gig
  *
  * For more information visit http://www.CollectiveAccess.org
  *
@@ -104,7 +104,7 @@ class Db_pdo_mysql extends DbDriverBase {
 		}
 
 		if (!class_exists("PDO")) {
-			die(_t("Your PHP installation lacks PDO MySQL support. Please add it and retry..."));
+			throw new DatabaseException(_t("Your PHP installation lacks PDO MySQL support. Please add it and retry..."), 200, "Db->pdo_mysql->connect()");
 		}
 
 		try {
@@ -116,6 +116,7 @@ class Db_pdo_mysql extends DbDriverBase {
 			));
 		} catch (Exception $e) {
 			$po_caller->postError(200, $e->getMessage(), "Db->pdo_mysql->connect()");
+			throw new DatabaseException($e->getMessage(), 200, "Db->pdo_mysql->connect()");
 			return false;
 		}
 
@@ -158,6 +159,7 @@ class Db_pdo_mysql extends DbDriverBase {
 			return $o_statement;
 		} catch(PDOException $e) {
 			$po_caller->postError(240, $e->getMessage(), "Db->pdo_mysql->prepare()");
+			throw new DatabaseException($e->getMessage(), 240, "Db->pdo_mysql->prepare()");
 			return false;
 		}
 	}
@@ -169,21 +171,25 @@ class Db_pdo_mysql extends DbDriverBase {
 	 * @param PDOStatement $opo_statement
 	 * @param string $ps_sql SQL statement
 	 * @param array $pa_values array of placeholder replacements
+	 * @param array $pa_options
 	 * @return bool|DbResult
 	 */
-	public function execute($po_caller, $opo_statement, $ps_sql, $pa_values) {
+	public function execute($po_caller, $opo_statement, $ps_sql, $pa_values, $pa_options=null) {
 		if (!$ps_sql) {
 			$po_caller->postError(240, _t("Query is empty"), "Db->pdo_mysql->execute()");
+			throw new DatabaseException(_t("Query is empty"), 240, "Db->pdo_mysql->execute()");
 			return false;
 		}
 
 		if(!($opo_statement instanceof PDOStatement)) {
 			$po_caller->postError(250, _t("Invalid prepared statement"), "Db->pdo_mysql->execute()");
+			throw new DatabaseException(_t("Invalid prepared statement"), 250, "Db->pdo_mysql->execute()");
 			return false;
 		}
 
 		if(!is_array($va_tmp = self::rewriteQueryAndParams($ps_sql, $pa_values))) {
 			$po_caller->postError(250, _t("Query rewrite failed"), "Db->pdo_mysql->execute()");
+			throw new DatabaseException(_t("Query rewrite failed"), 250, "Db->pdo_mysql->execute()");
 			return false;
 		}
 
@@ -199,7 +205,8 @@ class Db_pdo_mysql extends DbDriverBase {
 			$opo_statement->closeCursor();
 			$opo_statement->execute((is_array($va_tmp['values']) && sizeof($va_tmp['values'])) ? array_values($va_tmp['values']) : null);
 		} catch(PDOException $e) {
-			$po_caller->postError($po_caller->nativeToDbError($this->opr_db->errorCode()), $e->getMessage().((__CA_ENABLE_DEBUG_OUTPUT__) ? "\n<pre>".caPrintStacktrace()."\n{$ps_sql}</pre>" : ""), "Db->pdo_mysql->execute()");
+			$po_caller->postError($this->nativeToDbError($this->opr_db->errorCode()), $e->getMessage(), "Db->pdo_mysql->execute()");
+			throw new DatabaseException($e->getMessage(), $this->nativeToDbError($this->opr_db->errorCode()), "Db->pdo_mysql->execute()");
 			return false;
 		}
 
@@ -251,7 +258,8 @@ class Db_pdo_mysql extends DbDriverBase {
 		try {
 			$this->opr_db->beginTransaction();
 		} catch(PDOException $e) {
-			$po_caller->postError(250, "Could not start transaction: ".$e->getMessage(), "Db->pdo_mysql->beginTransaction()");
+			$po_caller->postError(250, _t("Could not start transaction: %1", $e->getMessage()), "Db->pdo_mysql->beginTransaction()");
+			throw new DatabaseException(_t("Could not start transaction: %1", $e->getMessage()), 250, "Db->pdo_mysql->beginTransaction()");
 			return false;
 		}
 		return true;
@@ -267,6 +275,7 @@ class Db_pdo_mysql extends DbDriverBase {
 			$this->opr_db->commit();
 		} catch(PDOException $e) {
 			$po_caller->postError(250, "Could not commit transaction: ".$e->getMessage(), "Db->pdo_mysql->commitTransaction()");
+			throw new DatabaseException(_t("Could not commit transaction: %1", $e->getMessage()), 250, "Db->pdo_mysql->commitTransaction()");
 			return false;
 		}
 		return true;
@@ -280,6 +289,7 @@ class Db_pdo_mysql extends DbDriverBase {
 	public function rollbackTransaction($po_caller) {
 		if (!$this->opr_db->rollBack()) {
 			$po_caller->postError(250, "Could not rollback transaction", "Db->pdo_mysql->rollbackTransaction()");
+			throw new DatabaseException(_t("Could not rollback transaction: %1", $e->getMessage()), 250, "Db->pdo_mysql->rollbackTransaction()");
 			return false;
 		}
 		return true;
@@ -290,11 +300,16 @@ class Db_pdo_mysql extends DbDriverBase {
 	 * @param mixed $po_caller object representation of the calling class, usually Db
 	 * @param PDOStatement $pr_res mysql resource
 	 * @param mixed $pm_field the field or an array of fields
+	 * @param array $pa_options Options include:
+	 *      limit = cap number of field values returned. [Default is null]
+	 *
 	 * @return array an array of field values (if $pm_field is a single field name) or an array if field names each of which is an array of values (if $pm_field is an array of field names)
 	 */
-	function getAllFieldValues($po_caller, $pr_res, $pm_field) {
+	function getAllFieldValues($po_caller, $pr_res, $pm_field, $pa_options=null) {
 		$va_vals = array();
 
+		$pn_limit = isset($pa_options['limit']) ? (int)$pa_options['limit'] : null;
+        $c = 0;
 		if (is_array($pm_field)) {
 			$va_rows = $pr_res->fetchAll(PDO::FETCH_ASSOC);
 			foreach($va_rows as $va_row) {
@@ -303,6 +318,8 @@ class Db_pdo_mysql extends DbDriverBase {
 						$va_vals[$vs_field][] = $va_row[$vs_field];
 					}
 				}
+				$c++;
+				if ($pn_limit && ($c > $pn_limit)) { break; }
 			}
 		} else {
 			$va_rows = $pr_res->fetchAll(PDO::FETCH_ASSOC);
@@ -310,6 +327,9 @@ class Db_pdo_mysql extends DbDriverBase {
 				if(isset($va_row[$pm_field])) {
 					$va_vals[] = $va_row[$pm_field];
 				}
+				
+				$c++;
+				if ($pn_limit && ($c > $pn_limit)) { break; }
 			}
 		}
 		return $va_vals;
@@ -398,6 +418,7 @@ class Db_pdo_mysql extends DbDriverBase {
 			return $va_tables;
 		} catch(PDOException $e) {
 			$po_caller->postError(280, $e->getMessage(), "Db->pdo_mysql->getTables()");
+			throw new DatabaseException($e->getMessage(), 280, "Db->pdo_mysql->getTables()");
 			return false;
 		}
 	}
